@@ -87,7 +87,7 @@ def design_rewinder(g_grad, T_rew, system, slew_ratio=0.7, grad_rew_method='grop
         gropt_params = {}
         gropt_params['mode'] = 'free'
         gropt_params['gmax'] = max_grad*1e-3 # [mT/m] -> [T/m]
-        gropt_params['smax'] = max_slew * slew_ratio
+        gropt_params['smax'] = max_slew * slew_ratio / np.sqrt(2)  # [T/m/s] We divide by sqrt(2) to ensure no rotation exceeds max slew. It may be over zealous in some cases.
         gropt_params['dt']   = GRT
 
         if rotate_grads:
@@ -103,6 +103,11 @@ def design_rewinder(g_grad, T_rew, system, slew_ratio=0.7, grad_rew_method='grop
             g_rotated = rotate_gradients(g_grad, res.x)
             M0, M1 = calculate_moments(g_rotated, GRT)
             g_rewind_x, g_rewind_y = design_rewinders_gropt(g_rotated, M0, M1, M1_nulling, T_rew, gropt_params, verbose=True)
+            # add zeros to the end of g_rewind_x or g_rewind_y to make them the same length (in case they are not).
+            if len(g_rewind_x) > len(g_rewind_y):
+                g_rewind_y = np.concatenate((g_rewind_y, np.zeros(len(g_rewind_x) - len(g_rewind_y))))
+            else:
+                g_rewind_x = np.concatenate((g_rewind_x, np.zeros(len(g_rewind_y) - len(g_rewind_x))))
             return g_rewind_x, g_rewind_y, g_rotated
 
         else:
