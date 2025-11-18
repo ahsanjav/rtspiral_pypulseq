@@ -1,0 +1,199 @@
+# HyperSLICE-style Spiral Sequence Configuration - OPTIMIZED PARAMETERS
+#
+# This configuration file uses HyperSLICE trajectory parameterization for
+# dynamic spiral imaging with temporal resolution optimization.
+#
+# Based on: https://github.com/mrphys/HyperSLICE
+#
+# OPTIMIZED PARAMETERS from HyperSLICE study:
+#   Inner k-space radius: 0.15
+#   Outer k-space radius: 0.56
+#   Relative acceleration: 0.07
+#   Transition: Hanning
+#   Ordering: Linear
+#   TR: 3.67 ms
+#   Temporal resolution: 55 ms
+#   Interleaves: 15
+#   Variable acceleration: [1.1, 15.0]
+#
+# Usage: python write_rtspiral_dd.py -c example_config_hyperslice
+
+[system]
+max_grad          =     22 # [mT/m] From HyperSLICE config_optimized_traj()
+max_slew          =    120 # [T/m/s] Adjusted for rtspiral implementation
+grad_raster_time  =  10e-6 # [s]
+rf_raster_time    =   1e-6 # [s]
+rf_ringdown_time  =  10e-6 # [s]
+rf_dead_time      = 200e-6 # [s]
+adc_dead_time     =  10e-6 # [s]
+
+[spiral]
+contrast     = 'trueFISP'
+slew_ratio   = 0.8  # Standard slew ratio (with lower gradient limits)
+# NOTE: ro_duration is NOT used in HyperSLICE mode - readout time is optimized automatically
+ro_duration = 3e-3 # [s] (ignored in HyperSLICE mode)
+adc_dwell   = 1.4e-6 # [s] ADC sample dwell time (from HyperSLICE source code)
+
+# Rewinder configuration (same as standard mode)
+grad_rew_method = 'ext_trap_area' # 'gropt', 'ext_trap_area', 'exact_time', 'm1_nayak'
+                                   # Using ext_trap_area to avoid gropt issues
+rewinder_time   = 2.0e-3 # [s] Max rewinder time (increased for deadtime)
+M1_nulling      = true  # First moment nulling for flow compensation
+rotate_grads    = false  # Rotate gradients for optimal timing
+
+# HyperSLICE-specific parameters - OPTIMIZED
+[spiral.hyperslice]
+# Base resolution (matrix size)
+base_resolution = 240  # Base matrix size (240x240, gives 1.67mm pixel at 40cm FOV)
+
+# Spiral arm configuration
+# From HyperSLICE source: config_optimized_traj()
+vd_spiral_arms = 16  # Number of spiral arms (HyperSLICE uses 16, not 15)
+optimize_arms = false  # Use exact spiral arm count (true = optimize to fit timing window)
+
+# Variable-density parameters - FROM HYPERSLICE config_optimized_traj()
+# Source: https://github.com/mrphys/HyperSLICE/blob/master/utils/preprocessing_trajectory_gen.py
+vd_inner_cutoff = 0.15      # Normalized radius (0-1) where undersampling starts
+                             # 0.15 = fully sample inner 15% of k-space (HyperSLICE value)
+pre_vd_outer_cutoff = 0.41288  # Offset for outer cutoff calculation (HyperSLICE exact value)
+                                # This achieves the desired outer cutoff with HyperSLICE formula
+vd_outer_density = 0.07     # Final density at edge (0-1)
+                             # 0.07 = 7% of Nyquist = ~14x undersampling at edge
+vd_type = 'hanning'         # Transition type: 'linear', 'quadratic', 'hanning'
+                             # OPTIMIZED: Hanning gives smooth transition
+
+# Temporal optimization parameters - FROM HYPERSLICE SOURCE CODE
+# Target: TR = 3.67 ms, Temporal resolution = 55 ms
+# Readout time target: ~1.67 ms (TR - deadtime = 3.67 - 2.0 = 1.67)
+min_max_arm_time = [1.3, 2.0]  # [ms] Acceptable readout time window
+                                # Target ~1.67 ms readout per spiral arm
+                                # With 15 arms (not optimized)
+max_tempres = 55.0  # [ms] OPTIMIZED: Maximum temporal resolution target
+                     # Number of views per frame = max_tempres / TR
+                     # With TR=3.67ms: views = 55/3.67 ≈ 15
+
+# Timing parameters - FROM HYPERSLICE SOURCE CODE
+# Source: https://github.com/mrphys/HyperSLICE/blob/master/utils/preprocessing_trajectory_gen.py
+deadtime = 2.0  # [ms] Deadtime value from HyperSLICE config_optimized_traj()
+                # This is the actual value used in their implementation
+                # TR(3.67) = readout_time(1.67) + deadtime(2.0)
+
+# Trajectory options - OPTIMIZED
+reverse = false      # Reverse trajectory direction (out-to-in vs in-to-out)
+ordering = 'golden'  # OPTIMIZED: Linear arm ordering
+                     # Options: 'linear', 'golden', 'ga', 'tiny', 'tinyga'
+tiny_number = 7      # For tiny golden angle mode only
+
+[acquisition]
+# Spatial parameters
+fov             = [40.0]  # [cm] Field of view
+# NOTE: resolution is calculated from base_resolution and FOV in HyperSLICE mode
+# resolution = FOV / base_resolution
+slice_thickness = 8       # [mm]
+tbwp            = 2       # Time-bandwidth product for RF pulse
+
+# RF parameters
+flip_angle      = 35    # [deg]
+rf_duration     = 0.5e-3  # [s]
+
+# Timing (use 0 for minimum)
+TR              = 0     # [ms], 0 for min TR
+TE              = 0     # [ms], 0 for min TE
+
+# Acquisition parameters
+repetitions     = 250    # Number of times to repeat the sequence
+
+[user_settings]
+write_seq    = true
+filename_ext = 'test_hs' # This will be attached to the filename
+show_plots   = false      # Disable plots to avoid hanging
+detailed_rep = true
+
+[acoustic_resonances]
+#frequencies = [700, 1164] # Aera
+#bandwidths = [100, 250]   # Aera
+frequencies = [595, 1030] # Free.max
+bandwidths = [130, 250]   # Free.max
+
+
+# ============================================================================
+# HyperSLICE Parameter Guidelines
+# ============================================================================
+#
+# 1. Variable-Density Parameters:
+#    - vd_inner_cutoff: Controls fully-sampled center region
+#      * 0.0-0.3 typical range
+#      * Larger = more fully sampled center = better SNR but longer readout
+#
+#    - vd_outer_density: Controls edge undersampling
+#      * 0.05-0.25 typical range
+#      * Smaller = more undersampling = shorter readout but worse outer k-space
+#
+#    - pre_vd_outer_cutoff: Controls transition region
+#      * 0.2-0.6 typical range
+#      * Affects how quickly density transitions from inner to outer
+#
+# 2. Temporal Optimization:
+#    - min_max_arm_time: Readout duration window [min, max] in ms
+#      * Algorithm adjusts vd_spiral_arms to fit this window
+#      * Tighter window = fewer valid solutions = may fail to converge
+#      * Typical: [0.5, 2.0] ms
+#
+#    - max_tempres: Maximum temporal resolution in ms
+#      * Number of views = floor(max_tempres / TR)
+#      * Smaller = better temporal res but more undersampling
+#      * Typical cardiac: 30-80 ms
+#
+#    - deadtime: Non-readout time per TR in ms
+#      * Includes rewinders, spoilers, system delays
+#      * Typical: 0.5-2.0 ms
+#
+# 3. OPTIMIZED PRESET (Currently Active):
+#
+#    This configuration uses optimized parameters from HyperSLICE study:
+#      base_resolution = 240
+#      vd_inner_cutoff = 0.15       (inner k-space radius)
+#      pre_vd_outer_cutoff = 0.413  (achieves outer radius = 0.56)
+#      vd_outer_density = 0.07      (relative acceleration outer/inner)
+#      vd_type = 'hanning'          (transition type)
+#      min_max_arm_time = [1.5, 1.8] (targets ~1.67 ms readout)
+#      max_tempres = 55.0           (temporal resolution)
+#      deadtime = 2.0               (achieves TR = 3.67 ms)
+#      ordering = 'linear'
+#      vd_spiral_arms = 15          (optimized interleaves)
+#
+#    Expected results:
+#      - TR: ~3.67 ms
+#      - Temporal resolution: ~55 ms
+#      - Views per frame: ~15
+#      - Variable acceleration: 1.1 (center) to 15.0 (edge)
+#
+# 4. Alternative Presets:
+#
+#    High spatial resolution:
+#      base_resolution = 320
+#      vd_inner_cutoff = 0.25
+#      vd_outer_density = 0.15
+#      min_max_arm_time = [1.5, 3.0]
+#      max_tempres = 80
+#
+#    High temporal resolution:
+#      base_resolution = 192
+#      vd_inner_cutoff = 0.10
+#      vd_outer_density = 0.05
+#      min_max_arm_time = [0.5, 1.2]
+#      max_tempres = 35
+#
+# ============================================================================
+
+# Optional add-ons (same as standard config)
+# [acquisition.fa_schedule]
+# type = "ramp_ibrahim"
+# enabled = false
+# T1                = 683 # [ms]
+# T2                = 77  # [ms]
+#
+# [[preparations]]
+# type = "trigger"
+# enabled = false
+# trigger_type = "physio1"

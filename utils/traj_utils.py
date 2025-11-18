@@ -108,6 +108,18 @@ def save_metadata(filename: str, k_traj_adc: npt.ArrayLike, params: dict, show_p
         'dt': adc_dwell
     }
 
+    # Add HyperSLICE-specific metadata if present
+    if params.get('hyperslice_mode', False):
+        meta['hyperslice'] = {
+            'base_resolution': params.get('base_resolution'),
+            'views_per_frame': params.get('views_per_frame'),
+            'temporal_resolution_ms': params.get('temporal_resolution_ms'),
+            'readout_time_ms': params.get('readout_time_ms'),
+            'vd_inner_cutoff': params.get('vd_inner_cutoff'),
+            'vd_outer_density': params.get('vd_outer_density'),
+            'reverse_traj': params.get('reverse_traj', False)
+        }
+
     traj_path = os.path.join(out_dir, f'{filename}.mat')
     os.makedirs(out_dir, exist_ok=True)
     savemat(traj_path, {'kx': kx, 'ky': ky,'kz': kz, 'w' : w, 'param': meta})
