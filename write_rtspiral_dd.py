@@ -617,33 +617,88 @@ if params['user_settings']['write_seq']:
         sio.savemat(grad_filename, grad_data)
         print(f'Gradient waveforms saved to: {grad_filename}')
 
-    # For TensorFlow-MRI, save ONLY the unique spiral arms (no repetition)
-    # This is the trajectory used for reconstruction
+    # For TensorFlow-MRI, handle trajectory saving based on ordering scheme
     if USE_TENSORFLOW_MRI:
-        # For reconstruction, we only need the unique spiral arms
-        # The repetition is handled by the reconstruction algorithm
         n_unique_arms = trajectory['n_arms']
         n_samples_per_arm = trajectory['n_samples']
 
-        # Build trajectory with only unique arms
-        kx_all = []
-        ky_all = []
+        # For golden angle, each TR needs a unique rotated trajectory
+        # For linear, we only need the base arms
+        if hs_ordering in ['golden', 'ga', 'tinyga']:
+            # Golden angle ordering: generate unique rotations
+            kx_all = []
+            ky_all = []
 
-        for arm_idx in range(n_unique_arms):
-            # Get k-space trajectory for this arm (already in rad/m)
-            kx_arm = trajectory['kx'][arm_idx, :] / (2 * np.pi)  # Convert rad/m to 1/m
-            ky_arm = trajectory['ky'][arm_idx, :] / (2 * np.pi)
+            # Golden angle in radians
+            if hs_ordering == 'golden' or hs_ordering == 'ga':
+                golden_angle_rad = params['spiral']['GA_angle'] * np.pi / 180
+            else:  # tiny golden angle
+                golden_angle_rad = params['spiral']['GA_angle'] * np.pi / 180
 
-            kx_all.extend(kx_arm)
-            ky_all.extend(ky_arm)
+            # Get number of unique rotations from config (default to all TRs if not specified)
+            # First check in hyperslice section, then spiral section, then default to all TRs
+            n_unique_ga_rotations = params['spiral'].get('hyperslice', {}).get('n_unique_rotations',
+                                    params['spiral'].get('n_unique_rotations', n_TRs))
 
-        # Convert to numpy arrays
-        kx_all = np.array(kx_all)
-        ky_all = np.array(ky_all)
+            # For reconstruction, we save n_unique_ga_rotations × n_unique_arms trajectories
+            # The sequence will cycle through these during acquisition
+            rotation_idx = 0
+            for rot in range(n_unique_ga_rotations):
+                # Calculate rotation angle for this unique rotation
+                rotation_angle = rot * golden_angle_rad
 
-        # Reshape for [dim, RO, INT] format - using unique arms only
-        kx_reshaped = kx_all.reshape(n_unique_arms, n_samples_per_arm).T  # [RO, INT]
-        ky_reshaped = ky_all.reshape(n_unique_arms, n_samples_per_arm).T  # [RO, INT]
+                # Apply this rotation to all base arms
+                for arm_idx in range(n_unique_arms):
+                    # Get base trajectory for this arm
+                    kx_base = trajectory['kx'][arm_idx, :] / (2 * np.pi)  # Convert rad/m to 1/m
+                    ky_base = trajectory['ky'][arm_idx, :] / (2 * np.pi)
+
+                    # Apply rotation
+                    cos_theta = np.cos(rotation_angle)
+                    sin_theta = np.sin(rotation_angle)
+                    kx_rotated = kx_base * cos_theta - ky_base * sin_theta
+                    ky_rotated = kx_base * sin_theta + ky_base * cos_theta
+
+                    kx_all.extend(kx_rotated)
+                    ky_all.extend(ky_rotated)
+
+            # Convert to numpy arrays
+            kx_all = np.array(kx_all)
+            ky_all = np.array(ky_all)
+
+            # Total saved trajectories = n_unique_ga_rotations × n_unique_arms
+            n_saved_trajectories = n_unique_ga_rotations * n_unique_arms
+
+            # Reshape for [dim, RO, INT] format
+            kx_reshaped = kx_all.reshape(n_saved_trajectories, n_samples_per_arm).T  # [RO, INT]
+            ky_reshaped = ky_all.reshape(n_saved_trajectories, n_samples_per_arm).T  # [RO, INT]
+
+            n_saved_rotations = n_saved_trajectories  # Total unique trajectories saved
+
+            print(f"Golden angle trajectory: {n_unique_ga_rotations} rotations × {n_unique_arms} arms = {n_saved_trajectories} unique trajectories")
+
+        else:
+            # Linear ordering: only save the base arms without rotation
+            kx_all = []
+            ky_all = []
+
+            for arm_idx in range(n_unique_arms):
+                # Get k-space trajectory for this arm (already in rad/m)
+                kx_arm = trajectory['kx'][arm_idx, :] / (2 * np.pi)  # Convert rad/m to 1/m
+                ky_arm = trajectory['ky'][arm_idx, :] / (2 * np.pi)
+
+                kx_all.extend(kx_arm)
+                ky_all.extend(ky_arm)
+
+            # Convert to numpy arrays
+            kx_all = np.array(kx_all)
+            ky_all = np.array(ky_all)
+
+            # Reshape for [dim, RO, INT] format
+            kx_reshaped = kx_all.reshape(n_unique_arms, n_samples_per_arm).T  # [RO, INT]
+            ky_reshaped = ky_all.reshape(n_unique_arms, n_samples_per_arm).T  # [RO, INT]
+
+            n_saved_rotations = n_unique_arms  # Only save base arms for linear
 
         # Stack to create [dim, RO, INT]
         traj = np.stack([kx_reshaped, ky_reshaped], axis=0)  # [2, RO, INT]
@@ -652,12 +707,12 @@ if params['user_settings']['write_seq']:
         t_adc_tfmri = np.arange(len(kx_all)) * trajectory['dwell_time']
 
         readout_traj = {
-            'kx': kx_all,  # k-space x coordinates [1/m] - unique arms only
-            'ky': ky_all,  # k-space y coordinates [1/m] - unique arms only
+            'kx': kx_all,  # k-space x coordinates [1/m]
+            'ky': ky_all,  # k-space y coordinates [1/m]
             'traj': traj,   # trajectory organized as [dim, RO, INT]
             't': t_adc_tfmri,  # time points during ADC [s]
-            'n_rotations': n_unique_arms,    # number of unique spiral arms
-            'n_samples_per_rotation': n_samples_per_arm,  # ADC samples per arm
+            'n_rotations': n_saved_rotations,    # number of saved rotations
+            'n_samples_per_rotation': n_samples_per_arm,  # ADC samples per rotation
             'adc_dwell': trajectory['dwell_time'],  # ADC dwell time [s]
             'fov': fov[0],           # field of view [cm]
             'resolution': res,       # spatial resolution [mm]
@@ -665,7 +720,8 @@ if params['user_settings']['write_seq']:
             'temporal_resolution_ms': temp_res_ms,  # temporal resolution [ms]
             'ordering': hs_ordering,  # arm ordering scheme
             'ga_angle': params['spiral']['GA_angle'],  # golden angle [deg]
-            'n_arms': n_unique_arms,  # number of unique arms
+            'n_base_arms': n_unique_arms,  # number of base spiral arms
+            'n_unique_ga_rotations': n_unique_ga_rotations if hs_ordering in ['golden', 'ga', 'tinyga'] else 0,
             'total_TRs': n_TRs,      # total number of TRs in sequence
         }
     else:

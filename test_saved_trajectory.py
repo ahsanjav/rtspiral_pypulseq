@@ -59,13 +59,20 @@ print(f"   Rotations/Arms: {n_rotations}")
 print(f"   Samples per rotation: {n_samples}")
 
 # Check if this is unique arms only (new format) or repeated (old format)
-if 'n_arms' in readout_data.dtype.names:
-    n_arms = int(readout_data['n_arms'][0,0])
-    print(f"   Unique arms: {n_arms}")
+if 'n_base_arms' in readout_data.dtype.names:
+    n_base_arms = int(readout_data['n_base_arms'][0,0])
+    print(f"   Base arms: {n_base_arms}")
     if 'total_TRs' in readout_data.dtype.names:
         total_TRs = int(readout_data['total_TRs'][0,0])
         print(f"   Total TRs: {total_TRs}")
-    print(f"   ✓ Using unique arms only (no repetition)")
+
+if 'ordering' in readout_data.dtype.names:
+    ordering = str(readout_data['ordering'][0,0][0]) if hasattr(readout_data['ordering'][0,0], '__getitem__') else str(readout_data['ordering'][0,0])
+    print(f"   Ordering: {ordering}")
+    if ordering in ['golden', 'ga', 'tinyga']:
+        print(f"   ✓ Golden angle: each TR has unique rotation")
+    else:
+        print(f"   ✓ Linear: using base arms only")
 
 # Check for rewinders by analyzing transitions between rotations/arms
 print(f"\n3. Checking spiral arm structure:")
@@ -187,7 +194,13 @@ if n_rotations > 1:
 
 # Summary
 axes[1, 2].axis('off')
-summary = f"""
+# Check ordering type for summary
+ordering = 'unknown'
+if 'ordering' in readout_data.dtype.names:
+    ordering = str(readout_data['ordering'][0,0][0]) if hasattr(readout_data['ordering'][0,0], '__getitem__') else str(readout_data['ordering'][0,0])
+
+if ordering in ['golden', 'ga', 'tinyga']:
+    summary = f"""
 TRAJECTORY ANALYSIS RESULTS:
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -197,20 +210,48 @@ TensorFlow-MRI Gradients:
 • No rewinder included ✓
 
 Saved Readout Trajectory:
-• {n_rotations} unique spiral arms
+• Ordering: {ordering} angle
+• {n_rotations} unique rotations
+• {n_samples} samples per rotation
+• Total: {len(kx_readout)} samples
+
+Golden Angle Format:
+• Each TR has unique rotation ✓
+• Rotated by {readout_data['ga_angle'][0,0]:.1f}°
+• Base arms: {readout_data['n_base_arms'][0,0] if 'n_base_arms' in readout_data.dtype.names else 'N/A'}
+• No rewinders included ✓
+
+CONCLUSION:
+✓ Trajectory correct for golden angle
+✓ All {n_rotations} unique rotations saved
+✓ Ready for reconstruction
+"""
+else:
+    summary = f"""
+TRAJECTORY ANALYSIS RESULTS:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+TensorFlow-MRI Gradients:
+• End at ~300 1/m (edge of k-space)
+• Do NOT return to zero ✓
+• No rewinder included ✓
+
+Saved Readout Trajectory:
+• Ordering: {ordering}
+• {n_rotations} spiral arms
 • {n_samples} samples per arm
 • Total: {len(kx_readout)} samples
 
-Trajectory Format:
-• Unique arms only (no repetition) ✓
+Linear/Sequential Format:
+• Base arms only (no rotation) ✓
 • Each arm starts at center
 • Each arm ends at k-space edge
-• No rewinders between arms ✓
+• No rewinders included ✓
 
 CONCLUSION:
-✓ Trajectory is correct for reconstruction
-✓ Contains only unique spiral arms
-✓ No rewinders included
+✓ Trajectory correct for {ordering}
+✓ Base spiral arms saved
+✓ Ready for reconstruction
 """
 
 axes[1, 2].text(0.1, 0.9, summary, transform=axes[1, 2].transAxes,

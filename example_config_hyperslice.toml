@@ -85,6 +85,8 @@ reverse = false      # Reverse trajectory direction (out-to-in vs in-to-out)
 ordering = 'golden'  # OPTIMIZED: Linear arm ordering for sequential acquisition
                      # Options: 'linear', 'golden', 'ga', 'tiny', 'tinyga'
 tiny_number = 7      # For tiny golden angle mode only
+n_unique_rotations = 256  # Number of unique golden angle rotations for reconstruction
+                          # Total TRs will cycle through base arms with these rotations
 
 [acquisition]
 # Spatial parameters
