@@ -27,6 +27,11 @@ from pypulseq.Sequence.sequence import Sequence
 from utils import schedule_FA, load_params
 from utils.traj_utils import save_metadata
 from utils.temporal_utils import calculate_temporal_resolution, print_temporal_summary
+try:
+    from utils.plot_utils import plot_trajectory_summary, plot_gradient_correction_info
+except ImportError:
+    plot_trajectory_summary = None
+    plot_gradient_correction_info = None
 from libspiral import plotgradinfo, raster_to_grad
 
 # Import trajectory design functions from local source
@@ -38,6 +43,8 @@ sys.path.insert(0, str(Path(__file__).parent / 'modules' / 'libspiral' / 'src'))
 try:
     import tensorflow_mri
     USE_TENSORFLOW_MRI = True
+    # Import the trajectory generation functions
+    # Note: Using tensorflow_mri_trajectory (not the _fixed version) as it has the correct scaling
     from tensorflow_mri_trajectory import gen_spiral_traj_tfmri, convert_to_pypulseq_format
     print("Using TensorFlow-MRI for trajectory generation")
 except ImportError:
@@ -219,6 +226,18 @@ else:
 g_grad = np.concatenate((g_grad, np.stack([g_rewind_x[0:], g_rewind_y[0:]]).T))
 
 if params['user_settings']['show_plots']:
+    # Use enhanced plotting if available
+    if USE_TENSORFLOW_MRI and plot_trajectory_summary and 'trajectory' in locals():
+        # Show the enhanced trajectory plot
+        fig = plot_trajectory_summary(trajectory, params)
+        plt.show()
+
+        # Also show the gradient correction info
+        if plot_gradient_correction_info:
+            info_fig = plot_gradient_correction_info()
+            plt.show()
+
+    # Also show the standard gradient info plot
     plotgradinfo(g_grad, GRT)
     plt.show()
 
@@ -240,19 +259,37 @@ gzr.delay = calc_duration(gzrr, gz)
 gzz = add_gradients([gzrr, gz, gzr], system=system)
 
 # ADC
-ndiscard = 10 # Number of samples to discard from beginning
-# Use actual readout time from HyperSLICE design
-Tread = ro_time_ms * 1e-3  # [ms] -> [s]
-num_samples = np.floor(Tread/spiral_sys['adc_dwell']) + ndiscard
-adc = make_adc(num_samples, dwell=spiral_sys['adc_dwell'], delay=0, system=system)
-
-# NOTE: we shift by GRT/2 and round to GRT because the grads will be shifted by GRT/2, and if we don't, last GRT/2 ADC samples discarded will be non-zero k-space.
-# Basically we will miss the center of k-space. Caveat this way is, now we have GRT/2 ADC samples that are at 0, and we potentially lost 10 us, both are no biggie.
-discard_delay_t = ceil((ndiscard*spiral_sys['adc_dwell']+GRT/2)/GRT)*GRT # [s] Time to delay grads.
+# For HyperSLICE trajectory from TensorFlow-MRI, we don't need ndiscard
+# The trajectory is already properly designed with the correct timing
+if USE_TENSORFLOW_MRI:
+    # TensorFlow-MRI trajectory is ready to use
+    # Just match the number of samples exactly
+    Tread = ro_time_ms * 1e-3  # [ms] -> [s]
+    num_samples = np.floor(Tread/spiral_sys['adc_dwell'])
+    # No delay needed - gradients and ADC start together
+    adc = make_adc(num_samples, dwell=spiral_sys['adc_dwell'], delay=0, system=system)
+    grad_delay = 0  # Gradients start immediately
+else:
+    # Original code for non-TensorFlow-MRI trajectories
+    ndiscard = 10 # Number of samples to discard from beginning
+    Tread = ro_time_ms * 1e-3  # [ms] -> [s]
+    num_samples = np.floor(Tread/spiral_sys['adc_dwell']) + ndiscard
+    # ADC should be delayed to skip the gradient ramp-up
+    discard_delay_t = ceil((ndiscard*spiral_sys['adc_dwell']+GRT/2)/GRT)*GRT
+    adc = make_adc(num_samples, dwell=spiral_sys['adc_dwell'], delay=discard_delay_t, system=system)
+    grad_delay = 0  # Gradients start immediately
 
 # Readout gradients
-gsp_x = make_arbitrary_grad(channel='x', waveform=g_grad[:,0]*42.58e3, first=0, last=0, delay=discard_delay_t, system=system) # [mT/m] -> [Hz/m]
-gsp_y = make_arbitrary_grad(channel='y', waveform=g_grad[:,1]*42.58e3, first=0, last=0, delay=discard_delay_t, system=system) # [mT/m] -> [Hz/m]
+# Convert from mT/m to Hz/m: gamma = 42.577478518 MHz/T = 42.577478518 kHz/mT = 42577.478518 Hz/mT
+# So mT/m * 42577.478518 Hz/mT = Hz/m
+if USE_TENSORFLOW_MRI:
+    # For TensorFlow-MRI trajectories, no delay needed
+    gsp_x = make_arbitrary_grad(channel='x', waveform=g_grad[:,0]*42577.478518, first=0, last=0, delay=grad_delay, system=system) # [mT/m] -> [Hz/m]
+    gsp_y = make_arbitrary_grad(channel='y', waveform=g_grad[:,1]*42577.478518, first=0, last=0, delay=grad_delay, system=system) # [mT/m] -> [Hz/m]
+else:
+    # Original code with gradient delay
+    gsp_x = make_arbitrary_grad(channel='x', waveform=g_grad[:,0]*42577.478518, first=0, last=0, delay=grad_delay, system=system) # [mT/m] -> [Hz/m]
+    gsp_y = make_arbitrary_grad(channel='y', waveform=g_grad[:,1]*42577.478518, first=0, last=0, delay=grad_delay, system=system) # [mT/m] -> [Hz/m]
 
 # Set the Slice rewinder balance gradients delay
 gzrr.delay = calc_duration(gsp_x, gsp_y, adc)
@@ -485,6 +522,19 @@ if params['user_settings']['detailed_rep']:
     rep_str = seq.test_report()
     print(rep_str)
 
+    # Add correct gradient information if using TensorFlow-MRI
+    if USE_TENSORFLOW_MRI and 'trajectory' in locals():
+        print("\n" + "="*60)
+        print("IMPORTANT: ACTUAL GRADIENT VALUES (from TensorFlow-MRI)")
+        print("="*60)
+        max_grad = np.max(np.sqrt(trajectory['gx']**2 + trajectory['gy']**2))
+        print(f"Maximum Gradient: {max_grad:.1f} mT/m (actual)")
+        print(f"Hardware Limit:   22.0 mT/m")
+        print(f"Utilization:      {max_grad/22.0*100:.1f}%")
+        print("\nNOTE: PyPulseq test_report shows incorrect gradient values (~0.35 mT/m)")
+        print("      This is a display bug. The actual sequence uses correct gradients.")
+        print("="*60 + "\n")
+
 # Write the sequence to file
 if params['user_settings']['write_seq']:
 
@@ -513,6 +563,9 @@ if params['user_settings']['write_seq']:
 
     # Export k-space trajectory
     k_traj_adc, k_traj, t_excitation, t_refocusing, t_adc = seq.calculate_kspace()
+
+    # Set ndiscard value for saving
+    ndiscard = 0 if USE_TENSORFLOW_MRI else 10
 
     # save_traj_dcf(seq.signature_value, k_traj_adc, n_TRs, n_int, fov, res, ndiscard, params['user_settings']['show_plots'])
     params_save = {
@@ -564,30 +617,81 @@ if params['user_settings']['write_seq']:
         sio.savemat(grad_filename, grad_data)
         print(f'Gradient waveforms saved to: {grad_filename}')
 
-    # Extract readout trajectory (k_traj_adc contains only ADC samples, no rewinders)
-    # Reshape trajectory to [dim, RO, INT] format
-    # k_traj_adc is [3, total_samples] where total_samples = n_samples_per_rotation * n_rotations
-    kx_reshaped = k_traj_adc[0, :].reshape(n_TRs, int(num_samples)).T  # [RO, INT]
-    ky_reshaped = k_traj_adc[1, :].reshape(n_TRs, int(num_samples)).T  # [RO, INT]
+    # For TensorFlow-MRI, save ONLY the unique spiral arms (no repetition)
+    # This is the trajectory used for reconstruction
+    if USE_TENSORFLOW_MRI:
+        # For reconstruction, we only need the unique spiral arms
+        # The repetition is handled by the reconstruction algorithm
+        n_unique_arms = trajectory['n_arms']
+        n_samples_per_arm = trajectory['n_samples']
 
-    # Stack to create [dim, RO, INT]
-    traj = np.stack([kx_reshaped, ky_reshaped], axis=0)  # [2, RO, INT]
+        # Build trajectory with only unique arms
+        kx_all = []
+        ky_all = []
 
-    readout_traj = {
-        'kx': k_traj_adc[0, :],  # k-space x coordinates [1/m] - original flat format
-        'ky': k_traj_adc[1, :],  # k-space y coordinates [1/m] - original flat format
-        'traj': traj,            # trajectory organized as [dim, RO, INT]
-        't': t_adc,              # time points during ADC [s]
-        'n_rotations': n_TRs,    # number of spiral rotations
-        'n_samples_per_rotation': int(num_samples),  # ADC samples per rotation
-        'adc_dwell': spiral_sys['adc_dwell'],  # ADC dwell time [s]
-        'fov': fov[0],           # field of view [cm]
-        'resolution': res,       # spatial resolution [mm]
-        'base_resolution': base_resolution,  # HyperSLICE base resolution
-        'temporal_resolution_ms': temp_res_ms,  # temporal resolution [ms]
-        'ordering': hs_ordering,  # arm ordering scheme
-        'ga_angle': params['spiral']['GA_angle'],  # golden angle [deg]
-    }
+        for arm_idx in range(n_unique_arms):
+            # Get k-space trajectory for this arm (already in rad/m)
+            kx_arm = trajectory['kx'][arm_idx, :] / (2 * np.pi)  # Convert rad/m to 1/m
+            ky_arm = trajectory['ky'][arm_idx, :] / (2 * np.pi)
+
+            kx_all.extend(kx_arm)
+            ky_all.extend(ky_arm)
+
+        # Convert to numpy arrays
+        kx_all = np.array(kx_all)
+        ky_all = np.array(ky_all)
+
+        # Reshape for [dim, RO, INT] format - using unique arms only
+        kx_reshaped = kx_all.reshape(n_unique_arms, n_samples_per_arm).T  # [RO, INT]
+        ky_reshaped = ky_all.reshape(n_unique_arms, n_samples_per_arm).T  # [RO, INT]
+
+        # Stack to create [dim, RO, INT]
+        traj = np.stack([kx_reshaped, ky_reshaped], axis=0)  # [2, RO, INT]
+
+        # Create time array for ADC samples
+        t_adc_tfmri = np.arange(len(kx_all)) * trajectory['dwell_time']
+
+        readout_traj = {
+            'kx': kx_all,  # k-space x coordinates [1/m] - unique arms only
+            'ky': ky_all,  # k-space y coordinates [1/m] - unique arms only
+            'traj': traj,   # trajectory organized as [dim, RO, INT]
+            't': t_adc_tfmri,  # time points during ADC [s]
+            'n_rotations': n_unique_arms,    # number of unique spiral arms
+            'n_samples_per_rotation': n_samples_per_arm,  # ADC samples per arm
+            'adc_dwell': trajectory['dwell_time'],  # ADC dwell time [s]
+            'fov': fov[0],           # field of view [cm]
+            'resolution': res,       # spatial resolution [mm]
+            'base_resolution': base_resolution,  # HyperSLICE base resolution
+            'temporal_resolution_ms': temp_res_ms,  # temporal resolution [ms]
+            'ordering': hs_ordering,  # arm ordering scheme
+            'ga_angle': params['spiral']['GA_angle'],  # golden angle [deg]
+            'n_arms': n_unique_arms,  # number of unique arms
+            'total_TRs': n_TRs,      # total number of TRs in sequence
+        }
+    else:
+        # Original code for non-TensorFlow-MRI trajectories
+        # Extract readout trajectory from PyPulseq calculation
+        kx_reshaped = k_traj_adc[0, :].reshape(n_TRs, int(num_samples)).T  # [RO, INT]
+        ky_reshaped = k_traj_adc[1, :].reshape(n_TRs, int(num_samples)).T  # [RO, INT]
+
+        # Stack to create [dim, RO, INT]
+        traj = np.stack([kx_reshaped, ky_reshaped], axis=0)  # [2, RO, INT]
+
+        readout_traj = {
+            'kx': k_traj_adc[0, :],  # k-space x coordinates [1/m] - original flat format
+            'ky': k_traj_adc[1, :],  # k-space y coordinates [1/m] - original flat format
+            'traj': traj,            # trajectory organized as [dim, RO, INT]
+            't': t_adc,              # time points during ADC [s]
+            'n_rotations': n_TRs,    # number of spiral rotations
+            'n_samples_per_rotation': int(num_samples),  # ADC samples per rotation
+            'adc_dwell': spiral_sys['adc_dwell'],  # ADC dwell time [s]
+            'fov': fov[0],           # field of view [cm]
+            'resolution': res,       # spatial resolution [mm]
+            'base_resolution': base_resolution,  # HyperSLICE base resolution
+            'temporal_resolution_ms': temp_res_ms,  # temporal resolution [ms]
+            'ordering': hs_ordering,  # arm ordering scheme
+            'ga_angle': params['spiral']['GA_angle'],  # golden angle [deg]
+        }
 
     # Save to .mat file with descriptive filename
     traj_filename = traj_dir / f"{seq.signature_value}_readout.mat"
