@@ -114,29 +114,34 @@ def gen_spiral_traj_tfmri(
         kx[arm, :] = trajectory_np[arm, :, 0]
         ky[arm, :] = trajectory_np[arm, :, 1]
 
-    # The trajectory from TensorFlow-MRI is in normalized units
-    # We need to properly scale it
-    # Based on testing, the trajectory reaches k_max ≈ 3.12 in these units
-    # This corresponds to vd_outer_cutoff * Nyquist frequency
+    # TensorFlow-MRI returns k-space in normalized units where max ≈ 3.12
+    # This should map to the full k-space extent (-0.5 to 0.5 in normalized coordinates)
 
     # Find actual k_max in the trajectory
     k_mag = np.sqrt(kx**2 + ky**2)
     k_max_actual = np.max(k_mag)
 
-    # Expected k_max in cycles/FOV
-    nyquist_k = base_resolution / 2  # 120 for base_resolution=240
-    k_max_expected_cycles_fov = nyquist_k * vd_outer_cutoff
-
-    # Scale to cycles/FOV
-    scale_to_cycles_fov = k_max_expected_cycles_fov / k_max_actual if k_max_actual > 0 else 1.0
-    kx = kx * scale_to_cycles_fov
-    ky = ky * scale_to_cycles_fov
-
-    # Convert to rad/m
+    # Convert FOV to meters
     fov_m = field_of_view * 1e-3  # mm to m
-    k_scale = 2 * np.pi / fov_m
-    kx_rad_m = kx * k_scale
-    ky_rad_m = ky * k_scale
+
+    # The trajectory should span the full k-space
+    # In normalized units: -0.5 to 0.5
+    # In physical units: -kmax to kmax where kmax = 1/(2*resolution)
+    resolution_m = fov_m / base_resolution  # Resolution in meters
+    kmax_physical = 0.5 / resolution_m  # Maximum k-space extent in 1/m
+
+    # Scale the trajectory to physical units
+    # The TensorFlow-MRI output needs to be scaled to reach proper k-space extent
+    # Based on empirical testing, k_max ≈ 3.12 should map to kmax_physical
+    scale_factor = kmax_physical / k_max_actual if k_max_actual > 0 else 1.0
+
+    # Apply scaling to get k-space in 1/m
+    kx_cycles_m = kx * scale_factor
+    ky_cycles_m = ky * scale_factor
+
+    # Convert to rad/m for gradient calculation
+    kx_rad_m = kx_cycles_m * 2 * np.pi
+    ky_rad_m = ky_cycles_m * 2 * np.pi
 
     # Calculate gradients
     dt = dwell_time * 1e-6  # us to s

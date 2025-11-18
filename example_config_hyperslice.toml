@@ -32,7 +32,7 @@ contrast     = 'trueFISP'
 slew_ratio   = 0.8  # Standard slew ratio (with lower gradient limits)
 # NOTE: ro_duration is NOT used in HyperSLICE mode - readout time is optimized automatically
 ro_duration = 3e-3 # [s] (ignored in HyperSLICE mode)
-adc_dwell   = 1.4e-6 # [s] ADC sample dwell time (from HyperSLICE source code)
+adc_dwell   = 2.0e-6 # [s] ADC sample dwell time (from HyperSLICE source code)
 
 # Rewinder configuration (same as standard mode)
 grad_rew_method = 'ext_trap_area' # 'gropt', 'ext_trap_area', 'exact_time', 'm1_nayak'
