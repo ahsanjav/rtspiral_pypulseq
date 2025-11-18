@@ -133,6 +133,24 @@ else:
     print("\n⚠️  Note: Detailed trajectory parameters not available in this file")
     print("    Re-generate trajectory with latest code to include full metadata")
 
+# Display rotation angle data if available
+if 'rotation_data' in k_readout.dtype.names:
+    rotation_data = k_readout['rotation_data'][0,0]
+    print("\n📐 ROTATION ANGLES")
+    print("-" * 40)
+    if 'golden_angle_deg' in rotation_data.dtype.names:
+        print(f"Golden angle:          {get_scalar(rotation_data['golden_angle_deg'][0,0]):.4f}° ({get_scalar(rotation_data['golden_angle_rad'][0,0]):.6f} rad)")
+    if 'rotation_angles_deg' in rotation_data.dtype.names:
+        angles_deg = rotation_data['rotation_angles_deg'][0,0].flatten()
+        angles_rad = rotation_data['rotation_angles_rad'][0,0].flatten()
+        print(f"Number of rotations:   {len(angles_deg)}")
+        print(f"Angle range:           {angles_deg[0]:.1f}° to {angles_deg[-1]:.1f}°")
+        # Show first few angles
+        print(f"First 5 angles:        ", end="")
+        for i in range(min(5, len(angles_deg))):
+            print(f"{angles_deg[i]:.1f}°", end=" ")
+        print()
+
 print("\n" + "=" * 70)
 print("All parameters successfully loaded and ready for reconstruction!")
 print("=" * 70)

@@ -628,12 +628,12 @@ if params['user_settings']['write_seq']:
             # Golden angle ordering: take first arm and rotate it
             kx_all = []
             ky_all = []
+            rotation_angles_deg = []  # Store rotation angle for each trajectory in degrees
+            rotation_angles_rad = []  # Store rotation angle for each trajectory in radians
 
-            # Golden angle in radians
-            if hs_ordering == 'golden' or hs_ordering == 'ga':
-                golden_angle_rad = params['spiral']['GA_angle'] * np.pi / 180
-            else:  # tiny golden angle
-                golden_angle_rad = params['spiral']['GA_angle'] * np.pi / 180
+            # Golden angle in radians and degrees
+            golden_angle_deg = params['spiral']['GA_angle']
+            golden_angle_rad = golden_angle_deg * np.pi / 180
 
             # Get number of unique rotations from config (default to n_unique_arms)
             # First check in hyperslice section, then spiral section, then default
@@ -648,11 +648,14 @@ if params['user_settings']['write_seq']:
             # Generate n_unique_ga_rotations by rotating the base trajectory
             for rot in range(n_unique_ga_rotations):
                 # Calculate rotation angle for this unique rotation
-                rotation_angle = rot * golden_angle_rad
+                rotation_angle_rad = rot * golden_angle_rad
+                rotation_angle_deg = rot * golden_angle_deg
+                rotation_angles_rad.append(rotation_angle_rad)
+                rotation_angles_deg.append(rotation_angle_deg)
 
                 # Apply rotation
-                cos_theta = np.cos(rotation_angle)
-                sin_theta = np.sin(rotation_angle)
+                cos_theta = np.cos(rotation_angle_rad)
+                sin_theta = np.sin(rotation_angle_rad)
                 kx_rotated = kx_base * cos_theta - ky_base * sin_theta
                 ky_rotated = kx_base * sin_theta + ky_base * cos_theta
 
@@ -662,6 +665,8 @@ if params['user_settings']['write_seq']:
             # Convert to numpy arrays
             kx_all = np.array(kx_all)
             ky_all = np.array(ky_all)
+            rotation_angles_deg = np.array(rotation_angles_deg)
+            rotation_angles_rad = np.array(rotation_angles_rad)
 
             # Total saved trajectories = n_unique_ga_rotations
             n_saved_trajectories = n_unique_ga_rotations
@@ -734,6 +739,17 @@ if params['user_settings']['write_seq']:
             'k_nyquist': 0.5 / (fov[0] * 10 / base_resolution),  # 1/m (FOV in cm -> m)
         }
 
+        # Add rotation angles for golden angle
+        if hs_ordering in ['golden', 'ga', 'tinyga']:
+            rotation_data = {
+                'rotation_angles_deg': rotation_angles_deg,  # Rotation angle for each trajectory [degrees]
+                'rotation_angles_rad': rotation_angles_rad,  # Rotation angle for each trajectory [radians]
+                'golden_angle_deg': golden_angle_deg,  # Base golden angle [degrees]
+                'golden_angle_rad': golden_angle_rad,  # Base golden angle [radians]
+            }
+        else:
+            rotation_data = None
+
         readout_traj = {
             'kx': kx_all,  # k-space x coordinates [1/m]
             'ky': ky_all,  # k-space y coordinates [1/m]
@@ -753,6 +769,10 @@ if params['user_settings']['write_seq']:
             'total_TRs': n_TRs,      # total number of TRs in sequence
             'traj_params': traj_params,  # Comprehensive trajectory parameters
         }
+
+        # Add rotation data if available
+        if rotation_data is not None:
+            readout_traj['rotation_data'] = rotation_data
     else:
         # Original code for non-TensorFlow-MRI trajectories
         # Extract readout trajectory from PyPulseq calculation
