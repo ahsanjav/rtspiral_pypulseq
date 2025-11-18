@@ -625,7 +625,7 @@ if params['user_settings']['write_seq']:
         # For golden angle, each TR needs a unique rotated trajectory
         # For linear, we only need the base arms
         if hs_ordering in ['golden', 'ga', 'tinyga']:
-            # Golden angle ordering: generate unique rotations
+            # Golden angle ordering: take first arm and rotate it
             kx_all = []
             ky_all = []
 
@@ -635,39 +635,36 @@ if params['user_settings']['write_seq']:
             else:  # tiny golden angle
                 golden_angle_rad = params['spiral']['GA_angle'] * np.pi / 180
 
-            # Get number of unique rotations from config (default to all TRs if not specified)
-            # First check in hyperslice section, then spiral section, then default to all TRs
+            # Get number of unique rotations from config (default to n_unique_arms)
+            # First check in hyperslice section, then spiral section, then default
             n_unique_ga_rotations = params['spiral'].get('hyperslice', {}).get('n_unique_rotations',
-                                    params['spiral'].get('n_unique_rotations', n_TRs))
+                                    params['spiral'].get('n_unique_rotations', n_unique_arms))
 
-            # For reconstruction, we save n_unique_ga_rotations × n_unique_arms trajectories
-            # The sequence will cycle through these during acquisition
-            rotation_idx = 0
+            # For golden angle: take the FIRST trajectory and rotate it n_unique_ga_rotations times
+            # Get the base trajectory (first arm only)
+            kx_base = trajectory['kx'][0, :] / (2 * np.pi)  # Convert rad/m to 1/m
+            ky_base = trajectory['ky'][0, :] / (2 * np.pi)
+
+            # Generate n_unique_ga_rotations by rotating the base trajectory
             for rot in range(n_unique_ga_rotations):
                 # Calculate rotation angle for this unique rotation
                 rotation_angle = rot * golden_angle_rad
 
-                # Apply this rotation to all base arms
-                for arm_idx in range(n_unique_arms):
-                    # Get base trajectory for this arm
-                    kx_base = trajectory['kx'][arm_idx, :] / (2 * np.pi)  # Convert rad/m to 1/m
-                    ky_base = trajectory['ky'][arm_idx, :] / (2 * np.pi)
+                # Apply rotation
+                cos_theta = np.cos(rotation_angle)
+                sin_theta = np.sin(rotation_angle)
+                kx_rotated = kx_base * cos_theta - ky_base * sin_theta
+                ky_rotated = kx_base * sin_theta + ky_base * cos_theta
 
-                    # Apply rotation
-                    cos_theta = np.cos(rotation_angle)
-                    sin_theta = np.sin(rotation_angle)
-                    kx_rotated = kx_base * cos_theta - ky_base * sin_theta
-                    ky_rotated = kx_base * sin_theta + ky_base * cos_theta
-
-                    kx_all.extend(kx_rotated)
-                    ky_all.extend(ky_rotated)
+                kx_all.extend(kx_rotated)
+                ky_all.extend(ky_rotated)
 
             # Convert to numpy arrays
             kx_all = np.array(kx_all)
             ky_all = np.array(ky_all)
 
-            # Total saved trajectories = n_unique_ga_rotations × n_unique_arms
-            n_saved_trajectories = n_unique_ga_rotations * n_unique_arms
+            # Total saved trajectories = n_unique_ga_rotations
+            n_saved_trajectories = n_unique_ga_rotations
 
             # Reshape for [dim, RO, INT] format
             kx_reshaped = kx_all.reshape(n_saved_trajectories, n_samples_per_arm).T  # [RO, INT]
@@ -675,7 +672,7 @@ if params['user_settings']['write_seq']:
 
             n_saved_rotations = n_saved_trajectories  # Total unique trajectories saved
 
-            print(f"Golden angle trajectory: {n_unique_ga_rotations} rotations × {n_unique_arms} arms = {n_saved_trajectories} unique trajectories")
+            print(f"Golden angle trajectory: 1 base arm × {n_unique_ga_rotations} rotations = {n_saved_trajectories} unique trajectories")
 
         else:
             # Linear ordering: only save the base arms without rotation
