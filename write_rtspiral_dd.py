@@ -703,6 +703,37 @@ if params['user_settings']['write_seq']:
         # Create time array for ADC samples
         t_adc_tfmri = np.arange(len(kx_all)) * trajectory['dwell_time']
 
+        # Save comprehensive trajectory parameters for reconstruction
+        traj_params = {
+            # HyperSLICE parameters
+            'base_resolution': base_resolution,
+            'vd_spiral_arms': vd_spiral_arms,
+            'vd_inner_cutoff': vd_inner_cutoff,
+            'pre_vd_outer_cutoff': pre_vd_outer_cutoff,
+            'vd_outer_density': vd_outer_density,
+            'vd_type': vd_type,
+
+            # Hardware parameters
+            'max_grad_ampl': trajectory.get('max_grad_ampl', 22.0),  # mT/m
+            'max_slew_rate': trajectory.get('max_slew_rate', 120.0),  # T/m/s
+            'grad_raster_time': GRT,  # s
+
+            # Timing parameters
+            'readout_time_ms': trajectory['readout_time'],  # ms
+            'dwell_time': trajectory['dwell_time'],  # s
+            'TR_ms': TR * 1e3,  # ms
+            'deadtime_ms': params['spiral']['hyperslice'].get('deadtime', 0.5),  # ms
+
+            # Trajectory generation method
+            'generation_method': 'TensorFlow-MRI',
+            'trajectory_type': 'spiral',
+            'variable_density': True,
+
+            # k-space extent
+            'k_max': np.sqrt(np.max(kx_all**2 + ky_all**2)),  # 1/m
+            'k_nyquist': 0.5 / (fov[0] * 10 / base_resolution),  # 1/m (FOV in cm -> m)
+        }
+
         readout_traj = {
             'kx': kx_all,  # k-space x coordinates [1/m]
             'ky': ky_all,  # k-space y coordinates [1/m]
@@ -720,6 +751,7 @@ if params['user_settings']['write_seq']:
             'n_base_arms': n_unique_arms,  # number of base spiral arms
             'n_unique_ga_rotations': n_unique_ga_rotations if hs_ordering in ['golden', 'ga', 'tinyga'] else 0,
             'total_TRs': n_TRs,      # total number of TRs in sequence
+            'traj_params': traj_params,  # Comprehensive trajectory parameters
         }
     else:
         # Original code for non-TensorFlow-MRI trajectories
