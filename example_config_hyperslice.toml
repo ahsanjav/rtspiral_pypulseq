@@ -105,12 +105,12 @@ TR              = 0     # [ms], 0 for min TR
 TE              = 0     # [ms], 0 for min TE
 
 # Acquisition parameters
-repetitions     = 300    # Number of times to repeat the sequence
+repetitions     = 4    # Number of times to repeat the sequence
 
 [user_settings]
 write_seq    = true
 filename_ext = 'test_hs' # This will be attached to the filename
-show_plots   = false      # Disable plots to avoid hanging
+show_plots   = true      # Disable plots to avoid hanging
 detailed_rep = true
 
 [acoustic_resonances]

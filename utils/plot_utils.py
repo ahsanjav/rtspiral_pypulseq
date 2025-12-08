@@ -40,7 +40,7 @@ def plot_trajectory_summary(trajectory: Dict, params: Dict, save_path: Optional[
     colors = plt.cm.rainbow(np.linspace(0, 1, trajectory['n_arms']))
 
     for arm in range(trajectory['n_arms']):
-        kx = trajectory['kx'][arm, :] / (2 * np.pi)  # rad/m to 1/m
+        kx = trajectory['kx'][arm, :] / (2 * np.pi)
         ky = trajectory['ky'][arm, :] / (2 * np.pi)
         ax1.plot(kx, ky, color=colors[arm], alpha=0.6, linewidth=0.5)
 
@@ -105,9 +105,11 @@ def plot_trajectory_summary(trajectory: Dict, params: Dict, save_path: Optional[
 
     # Plot 4: Slew rates
     ax4 = plt.subplot(2, 3, 4)
-    dt = trajectory['dwell_time']
-    dgx_dt = np.gradient(gx, dt) * 1e-3  # T/m/s
-    dgy_dt = np.gradient(gy, dt) * 1e-3
+    dt = trajectory['dwell_time']  # in seconds
+    # gx, gy are in mT/m, np.gradient gives mT/m/s, multiply by 1e-3 to get T/m/s
+    # But np.gradient(gx, dt) computes dg/dt where dt is the sample spacing
+    dgx_dt = np.gradient(gx, dt) / 1000.0  # mT/m/s -> T/m/s
+    dgy_dt = np.gradient(gy, dt) / 1000.0  # mT/m/s -> T/m/s
     slew_mag = np.sqrt(dgx_dt**2 + dgy_dt**2)
 
     ax4.plot(t_ms, dgx_dt, 'b-', label='$S_x$', linewidth=1, alpha=0.7)

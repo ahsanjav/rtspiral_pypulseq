@@ -1,0 +1,125 @@
+# 3D HyperSLICE-style Spiral Sequence Configuration
+#
+# This configuration file uses HyperSLICE trajectory parameterization for
+# 3D stack-of-spirals imaging with variable-density spirals and kz encoding.
+#
+# Based on: https://github.com/mrphys/HyperSLICE
+# Paper: PMID 37799087
+#
+# Usage: python write_rtspiral_3d_hyperslice.py -c config_3d_hyperslice.toml
+
+[system]
+max_grad          =     22 # [mT/m] From HyperSLICE config_optimized_traj()
+max_slew          =    120 # [T/m/s] Adjusted for rtspiral implementation
+grad_raster_time  =  10e-6 # [s]
+rf_raster_time    =   1e-6 # [s]
+rf_ringdown_time  =  10e-6 # [s]
+rf_dead_time      = 200e-6 # [s]
+adc_dead_time     =  10e-6 # [s]
+
+[spiral]
+contrast     = 'trueFISP'
+slew_ratio   = 0.8  # Standard slew ratio (with lower gradient limits)
+# NOTE: ro_duration is NOT used in HyperSLICE mode - readout time is optimized automatically
+ro_duration = 3e-3 # [s] (ignored in HyperSLICE mode)
+adc_dwell   = 2.0e-6 # [s] ADC sample dwell time (from HyperSLICE source code)
+
+# Rewinder configuration (same as standard mode)
+grad_rew_method = 'ext_trap_area' # 'gropt', 'ext_trap_area', 'exact_time', 'm1_nayak'
+rewinder_time   = 0.5e-3 # [s] Max rewinder time
+M1_nulling      = true  # First moment nulling for flow compensation
+rotate_grads    = false  # Rotate gradients for optimal timing
+
+# HyperSLICE-specific parameters
+[spiral.hyperslice]
+# Base resolution (matrix size)
+base_resolution = 240  # Base matrix size (240x240, gives 1.67mm pixel at 40cm FOV)
+
+# Spiral arm configuration
+vd_spiral_arms = 16  # Number of spiral arms
+optimize_arms = false  # Use exact spiral arm count
+
+# Variable-density parameters - FROM HYPERSLICE config_optimized_traj()
+vd_inner_cutoff = 0.15      # Normalized radius (0-1) where undersampling starts
+pre_vd_outer_cutoff = 0.41288  # Offset for outer cutoff calculation
+vd_outer_density = 0.07     # Final density at edge (0-1)
+vd_type = 'hanning'         # Transition type: 'linear', 'quadratic', 'hanning'
+
+# Temporal optimization parameters
+min_max_arm_time = [1.3, 2.0]  # [ms] Acceptable readout time window
+max_tempres = 55.0  # [ms] Maximum temporal resolution target
+
+# Timing parameters
+deadtime = 0.5  # [ms] Deadtime value from HyperSLICE
+
+# Trajectory options
+reverse = false      # Reverse trajectory direction
+ordering = 'golden'  # 'linear', 'golden', 'ga', 'tiny', 'tinyga'
+tiny_number = 7      # For tiny golden angle mode only
+n_unique_rotations = 256  # Number of unique golden angle rotations
+
+[acquisition]
+# Excitation type for 3D slab-selective
+excitation      = 'sinc'  # Options: 'sinc', 'slr'
+
+# Spatial parameters
+fov             = [40.0]  # [cm] Field of view (in-plane)
+slice_thickness = 60      # [mm] SLAB thickness for 3D
+tbwp            = 6       # Time-bandwidth product for RF pulse
+
+# RF parameters
+flip_angle      = 35    # [deg]
+rf_duration     = 1.2e-3  # [s]
+
+# Timing (use 0 for minimum)
+TR              = 0     # [ms], 0 for min TR
+TE              = 0     # [ms], 0 for min TE
+
+# Acquisition parameters
+repetitions     = 4     # Number of times to repeat full 3D acquisition
+n_dummy         = 30    # Number of dummy scans for steady state
+
+# 3D kz encoding parameters
+[acquisition.kz_encoding]
+FOV            = 110    # [mm] FOV in kz direction (slab coverage)
+repetitions    = 44     # Number of kz partitions
+ordering       = 'ping-pong'  # 'ping-pong', 'gaussian'
+rotation_type  = 'stack'      # 'arm' or 'stack'
+                              # 'stack': complete all kz partitions per arm before rotating
+                              # 'arm': rotate arm for each kz partition
+
+[user_settings]
+write_seq    = true
+filename_ext = '3d_hyperslice' # This will be attached to the filename
+show_plots   = false
+detailed_rep = true
+
+[acoustic_resonances]
+frequencies = [595, 1030] # Free.max
+bandwidths = [130, 250]   # Free.max
+
+
+# ============================================================================
+# 3D HyperSLICE Parameter Guidelines
+# ============================================================================
+#
+# 1. Slab-selective excitation:
+#    - slice_thickness now represents SLAB thickness (e.g., 60mm)
+#    - Actual slice thickness = slab / kz_encoding.repetitions
+#    - Example: 60mm slab / 44 partitions = 1.36mm slice thickness
+#
+# 2. kz Encoding:
+#    - FOV: Coverage in slice direction (should match or exceed slab)
+#    - repetitions: Number of kz phase encodes (partitions)
+#    - ordering:
+#      * 'ping-pong': Alternating center-out ordering
+#      * 'gaussian': Center-weighted ordering
+#    - rotation_type:
+#      * 'stack': Inner loop = kz (all partitions per spiral arm)
+#      * 'arm': Inner loop = arm (all arms per kz partition)
+#
+# 3. Total acquisition:
+#    - n_TRs = n_spiral_arms * kz_repetitions * repetitions
+#    - Example: 16 arms * 44 kz * 1 rep = 704 TRs
+#
+# ============================================================================

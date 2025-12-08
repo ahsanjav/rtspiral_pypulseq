@@ -1,14 +1,15 @@
 #%%
 """
-2D Real-Time Spiral Sequence Generator with HyperSLICE-style Trajectory Design
+3D Real-Time Spiral Sequence Generator with HyperSLICE-style Trajectory Design
 
-This script generates PyPulseq sequences using HyperSLICE trajectory parameterization:
+This script generates PyPulseq 3D stack-of-spirals sequences using HyperSLICE
+trajectory parameterization:
 - Variable-density control via cutoff radii and density factors
 - Temporal resolution optimization (iterates arms to fit time window)
+- 3D kz phase encoding with ping-pong or gaussian ordering
 - Maintains PyPulseq output for scanner deployment
 
-Based on write_rtspiral.py with HyperSLICE trajectory design from:
-https://github.com/mrphys/HyperSLICE/blob/master/utils/preprocessing_trajectory_gen.py
+Based on write_rtspiral_dd.py (2D HyperSLICE) and write_rtspiral_3d.py (3D encoding)
 
 Author: rtspiral_pypulseq team
 Date: 2025
@@ -19,7 +20,7 @@ import matplotlib.pyplot as plt
 import scipy.io as sio
 from pathlib import Path
 from pypulseq import Opts
-from pypulseq import (make_adc, make_sinc_pulse, make_digital_output_pulse, make_delay,
+from pypulseq import (make_adc, make_sinc_pulse, make_arbitrary_rf, make_digital_output_pulse, make_delay,
                       make_arbitrary_grad, make_trapezoid,
                       calc_duration, calc_rf_center,
                       rotate, add_gradients, make_label)
@@ -43,8 +44,6 @@ sys.path.insert(0, str(Path(__file__).parent / 'modules' / 'libspiral' / 'src'))
 try:
     import tensorflow_mri
     USE_TENSORFLOW_MRI = True
-    # Import the trajectory generation functions
-    # Note: Using tensorflow_mri_trajectory (not the _fixed version) as it has the correct scaling
     from tensorflow_mri_trajectory import gen_spiral_traj_tfmri, convert_to_pypulseq_format
     print("Using TensorFlow-MRI for trajectory generation")
 except ImportError:
@@ -55,6 +54,7 @@ except ImportError:
 from librewinder.design_rewinder import design_rewinder
 from kernels.kernel_handle_preparations import kernel_handle_preparations, kernel_handle_end_preparations
 from math import ceil
+from sigpy.mri.rf import slr
 import copy
 import argparse
 import os
@@ -62,17 +62,17 @@ import warnings
 
 # Cmd args
 parser = argparse.ArgumentParser(
-                    prog='Write2DRTSpiralHyperSLICE',
-                    description='Generates a 2D real-time spiral Pulseq sequence with HyperSLICE trajectory design.')
+                    prog='Write3DRTSpiralHyperSLICE',
+                    description='Generates a 3D stack-of-spirals Pulseq sequence with HyperSLICE trajectory design.')
 
-parser.add_argument('-c', '--config', type=str, default='example_config_hyperslice.toml', help='Config file path.')
+parser.add_argument('-c', '--config', type=str, default='config_3d_hyperslice.toml', help='Config file path.')
 
 args = parser.parse_args()
 
 
 print(f'Using config file: {args.config}.')
 print('=' * 60)
-print('HyperSLICE-style Trajectory Design Mode')
+print('3D HyperSLICE-style Stack-of-Spirals Trajectory Design Mode')
 print('=' * 60)
 
 # Load and prep system and sequence parameters
@@ -105,7 +105,7 @@ if 'hyperslice' not in params['spiral']:
     raise ValueError(
         "HyperSLICE parameters not found in config file. "
         "Please add [spiral.hyperslice] section. "
-        "See example_config_hyperslice.toml for reference."
+        "See config_3d_hyperslice.toml for reference."
     )
 
 hs_params = params['spiral']['hyperslice']
@@ -156,7 +156,7 @@ if USE_TENSORFLOW_MRI:
         readoutOS=2.0,  # from HyperSLICE
         deadtime=deadtime_ms
     )
-    
+
     # Extract trajectory for first arm (PyPulseq format)
     k, g, s, t = convert_to_pypulseq_format(trajectory)
 
@@ -165,9 +165,6 @@ if USE_TENSORFLOW_MRI:
     views = n_int  # For single shot
     ro_time_ms = trajectory['readout_time']
     temp_res_ms = ro_time_ms + deadtime_ms
-
-    # g is in mT/m, convert to T/m for consistency
-    #g = g * 1e-3  # mT/m to T/m
 
     print(f"TensorFlow-MRI trajectory generated:")
     print(f"  Samples per arm: {trajectory['n_samples']}")
@@ -212,12 +209,12 @@ t_grad, g_grad = raster_to_grad(g, spiral_sys['adc_dwell'], GRT)
 
 # Design rewinder
 if params['spiral']['rotate_grads']:
-    g_rewind_x, g_rewind_y, g_grad = design_rewinder(g_grad, params['spiral']['rewinder_time'], system, # type: ignore
+    g_rewind_x, g_rewind_y, g_grad = design_rewinder(g_grad, params['spiral']['rewinder_time'], system,
                                              slew_ratio=params['spiral']['slew_ratio'],
                                              grad_rew_method=params['spiral']['grad_rew_method'],
                                              M1_nulling=params['spiral']['M1_nulling'], rotate_grads=params['spiral']['rotate_grads'])
 else:
-    g_rewind_x, g_rewind_y = design_rewinder(g_grad, params['spiral']['rewinder_time'], system, # type: ignore
+    g_rewind_x, g_rewind_y = design_rewinder(g_grad, params['spiral']['rewinder_time'], system,
                                              slew_ratio=params['spiral']['slew_ratio'],
                                              grad_rew_method=params['spiral']['grad_rew_method'],
                                              M1_nulling=params['spiral']['M1_nulling'])
@@ -228,11 +225,9 @@ g_grad = np.concatenate((g_grad, np.stack([g_rewind_x[0:], g_rewind_y[0:]]).T))
 if params['user_settings']['show_plots']:
     # Use enhanced plotting if available
     if USE_TENSORFLOW_MRI and plot_trajectory_summary and 'trajectory' in locals():
-        # Show the enhanced trajectory plot
         fig = plot_trajectory_summary(trajectory, params)
         plt.show()
 
-        # Also show the gradient correction info
         if plot_gradient_correction_info:
             info_fig = plot_gradient_correction_info()
             plt.show()
@@ -242,59 +237,64 @@ if params['user_settings']['show_plots']:
     plt.show()
 
 #%%
-# Excitation
+# Excitation - support both sinc and SLR for slab-selective 3D
+excitation_type = params['acquisition'].get('excitation', 'sinc')
 tbwp = params['acquisition']['tbwp']
-rf, gz, gzr = make_sinc_pulse(flip_angle=params['acquisition']['flip_angle']/180*np.pi,
-                                duration=params['acquisition']['rf_duration'],
-                                slice_thickness=params['acquisition']['slice_thickness']*1e-3, # [mm] -> [m]
-                                time_bw_product=tbwp,
-                                return_gz=True,
-                                use='excitation', system=system) # type: ignore
+
+if excitation_type == 'sinc':
+    rf, gz, gzr = make_sinc_pulse(flip_angle=params['acquisition']['flip_angle']/180*np.pi,
+                                    duration=params['acquisition']['rf_duration'],
+                                    slice_thickness=params['acquisition']['slice_thickness']*1e-3, # [mm] -> [m]
+                                    time_bw_product=tbwp,
+                                    return_gz=True,
+                                    use='excitation', system=system)
+else:  # SLR pulse
+    alpha = params['acquisition']['flip_angle']
+    dt = system.rf_raster_time
+    raster_ratio = int(system.grad_raster_time / system.rf_raster_time)
+    Trf = params['acquisition']['rf_duration']
+
+    n = ceil((Trf/dt)/(4*raster_ratio))*4*raster_ratio
+    Trf = n*dt
+    bw = tbwp/Trf
+    signal = slr.dzrf(n=n, tb=tbwp, ptype='st', ftype='ls', d1=0.01, d2=0.01, cancel_alpha_phs=False)
+
+    rf, gz = make_arbitrary_rf(signal=signal, slice_thickness=params['acquisition']['slice_thickness']*1e-3,
+                               bandwidth=bw, flip_angle=alpha * np.pi / 180,
+                               system=system, return_gz=True, use="excitation")
+    gzr = make_trapezoid(channel='z', area=-gz.area/2, system=system)
 
 gzrr = copy.deepcopy(gzr)
-gzrr.delay = 0 #gz.delay
-rf.delay = calc_duration(gzrr) + gz.rise_time
-gz.delay = calc_duration(gzrr)
+gzrr.delay = 0
+
+additional_delay = 0
+if excitation_type == 'slr':
+    # For SLR, we may need additional delay for rf_dead_time
+    rf_delay_needed = calc_duration(gzrr) + gz.rise_time
+    if rf_delay_needed < params['system']['rf_dead_time']:
+        additional_delay = params['system']['rf_dead_time'] - rf_delay_needed
+
+rf.delay = calc_duration(gzrr) + gz.rise_time + additional_delay
+gz.delay = calc_duration(gzrr) + additional_delay
 gzr.delay = calc_duration(gzrr, gz)
 gzz = add_gradients([gzrr, gz, gzr], system=system)
 
-# # ADC
-# # For HyperSLICE trajectory from TensorFlow-MRI, we don't need ndiscard
-# # The trajectory is already properly designed with the correct timing
-# if USE_TENSORFLOW_MRI:
-#     # TensorFlow-MRI trajectory is ready to use
-#     # Just match the number of samples exactly
-#     Tread = ro_time_ms * 1e-3  # [ms] -> [s]
-#     num_samples = np.floor(Tread/spiral_sys['adc_dwell'])
-#     # No delay needed - gradients and ADC start together
-#     adc = make_adc(num_samples, dwell=spiral_sys['adc_dwell'], delay=0, system=system)
-#     grad_delay = 0  # Gradients start immediately
-# else:
-# Original code for non-TensorFlow-MRI trajectories
-ndiscard = 10 # Number of samples to discard from beginning
+# ADC
+ndiscard = 10  # Number of samples to discard from beginning
 Tread = ro_time_ms * 1e-3  # [ms] -> [s]
 num_samples = np.floor(Tread/spiral_sys['adc_dwell']) + ndiscard
-# ADC should be delayed to skip the gradient ramp-up
 discard_delay_t = ceil((ndiscard*spiral_sys['adc_dwell']+GRT/2)/GRT)*GRT
 adc = make_adc(num_samples, dwell=spiral_sys['adc_dwell'], delay=discard_delay_t, system=system)
 grad_delay = 0  # Gradients start immediately
 
 # Readout gradients
-# Convert from mT/m to Hz/m: gamma = 42.577478518 MHz/T = 42.577478518 kHz/mT = 42577.478518 Hz/mT
-# So mT/m * 42577.478518 Hz/mT = Hz/m
-# if USE_TENSORFLOW_MRI:
-#     # For TensorFlow-MRI trajectories, no delay needed
-#     gsp_x = make_arbitrary_grad(channel='x', waveform=g_grad[:,0]*42577.478518, first=0, last=0, delay=grad_delay, system=system) # [mT/m] -> [Hz/m]
-#     gsp_y = make_arbitrary_grad(channel='y', waveform=g_grad[:,1]*42577.478518, first=0, last=0, delay=grad_delay, system=system) # [mT/m] -> [Hz/m]
-# else:
-# Original code with gradient delay
-gsp_x = make_arbitrary_grad(channel='x', waveform=g_grad[:,0]*42577.478518, first=0, last=0, delay=grad_delay, system=system) # [mT/m] -> [Hz/m]
-gsp_y = make_arbitrary_grad(channel='y', waveform=g_grad[:,1]*42577.478518, first=0, last=0, delay=grad_delay, system=system) # [mT/m] -> [Hz/m]
+gsp_x = make_arbitrary_grad(channel='x', waveform=g_grad[:,0]*42577.478518, first=0, last=0, delay=grad_delay, system=system)
+gsp_y = make_arbitrary_grad(channel='y', waveform=g_grad[:,1]*42577.478518, first=0, last=0, delay=grad_delay, system=system)
 
 # Set the Slice rewinder balance gradients delay
 gzrr.delay = calc_duration(gsp_x, gsp_y, adc)
 
-# create a crusher gradient (only for FLASH)
+# create a crusher gradient (only for FLASH/FISP)
 if params['spiral']['contrast'] == 'FLASH' or params['spiral']['contrast'] == 'FISP':
     crush_area = (4 / (params['acquisition']['slice_thickness'] * 1e-3)) + (-1 * gzr.area)
     gz_crush = make_trapezoid(channel='z',
@@ -302,47 +302,40 @@ if params['spiral']['contrast'] == 'FLASH' or params['spiral']['contrast'] == 'F
                               max_grad=system.max_grad,
                               system=system)
 
-# set the rotations.
-# For HyperSLICE, we typically use the 'views' parameter to determine undersampling
-# Each view is one spiral arm per temporal frame
+# Set up spiral arm rotations
 gsp_xs = []
 gsp_ys = []
 
 # Override arm ordering for HyperSLICE mode
-# HyperSLICE typically uses 'linear', 'golden', or 'tiny_number' ordering
 hs_ordering = hs_params.get('ordering', 'linear')
 print(f"Spiral arm ordering (HyperSLICE mode): {hs_ordering}.")
 
 if hs_ordering == 'linear':
-    # Linear ordering with views per frame
     if (n_int%2) == 1 and (params['acquisition']['repetitions']%2) == 1:
-        warnings.warn("Number of interleaves is odd. To solve this, we increased it by 1. If this is undesired, please set repetitions to an even number instead.")
+        warnings.warn("Number of interleaves is odd. To solve this, we increased it by 1.")
         n_int += 1
     for i in range(0, n_int):
         gsp_x_rot, gsp_y_rot = rotate(gsp_x, gsp_y, axis="z", angle=2*np.pi*i/n_int)
         gsp_xs.append(gsp_x_rot)
         gsp_ys.append(gsp_y_rot)
         params['spiral']['GA_angle'] = 360/n_int
-    n_TRs = n_int * params['acquisition']['repetitions']
+    n_arms = n_int
 
 elif hs_ordering == 'golden' or hs_ordering == 'ga':
-    # Golden angle ordering
-    # Use GA_steps from config if available, otherwise use n_int * repetitions
-    n_TRs = params['spiral'].get('GA_steps', n_int * params['acquisition']['repetitions'])
-    if (n_TRs%2) == 1 and (params['acquisition']['repetitions']%2) == 1:
+    n_arms = params['spiral'].get('GA_steps', n_int * params['acquisition']['repetitions'])
+    if (n_arms%2) == 1 and (params['acquisition']['repetitions']%2) == 1:
         warnings.warn(
                     '''
                       ========================================
                       Number of arms in the sequence is odd.
-                      This may create steady state artifacts during the imaging with multiple runs, due to RF phase not alternating properly.
+                      This may create steady state artifacts.
                       To avoid this issue, set repetitions to an even number.
                       ========================================
                       ''')
 
-    n_int = n_TRs
     ang = 0
-    ga_angle = params['spiral'].get('GA_angle', 137.5077)  # Default golden angle
-    for i in range(0, n_TRs):
+    ga_angle = params['spiral'].get('GA_angle', 137.5077)
+    for i in range(0, n_arms):
         gsp_x_rot, gsp_y_rot = rotate(gsp_x, gsp_y, axis="z", angle=ang)
         gsp_xs.append(gsp_x_rot)
         gsp_ys.append(gsp_y_rot)
@@ -351,14 +344,13 @@ elif hs_ordering == 'golden' or hs_ordering == 'ga':
     params['spiral']['GA_angle'] = ga_angle
 
 elif hs_ordering == 'tiny' or hs_ordering == 'tinyga':
-    # Tiny golden angle
     tiny_number = hs_params.get('tiny_number', 7)
     tiny_ga = 360.0 / (n_int / tiny_number)
     print(f"  Using tiny golden angle: {tiny_ga:.4f} deg (tiny_number={tiny_number})")
 
-    n_TRs = n_int * params['acquisition']['repetitions']
+    n_arms = n_int * params['acquisition']['repetitions']
     ang = 0
-    for i in range(0, n_TRs):
+    for i in range(0, n_arms):
         gsp_x_rot, gsp_y_rot = rotate(gsp_x, gsp_y, axis="z", angle=ang)
         gsp_xs.append(gsp_x_rot)
         gsp_ys.append(gsp_y_rot)
@@ -369,35 +361,105 @@ elif hs_ordering == 'tiny' or hs_ordering == 'tinyga':
 else:
     raise Exception(f"Unknown arm ordering: {hs_ordering}")
 
+#%%
+# Set up 3D kz encoding
+acquisition_type = '3D' if 'kz_encoding' in params['acquisition'] else '2D'
+gzs = []
+dummy_trap = make_trapezoid(channel="z", area=0, system=system)
+kz_encoding_str = ''
+nkz = 1
+kz_idx = np.array([0])
+
+if acquisition_type == '3D':
+    kz_fov = params['acquisition']['kz_encoding']['FOV'] * 1e-3  # mm to m
+    nkz = params['acquisition']['kz_encoding']['repetitions']
+    phase_areas = (np.arange(nkz) - (nkz / 2)) * (1 / kz_fov)
+
+    # Make the largest trapezoid, and use its duration for all of them
+    dummy_trap = make_trapezoid(channel="z", area=phase_areas[0], system=system)
+
+    kz_encoding_str = params['acquisition']['kz_encoding']['ordering']
+    print(f"Kz encoding ordering is {kz_encoding_str}.")
+
+    if kz_encoding_str == 'ping-pong':
+        kz_idx = np.hstack((np.arange(nkz), np.flip(np.arange(nkz))))
+        for i in range(0, kz_idx.shape[0]):
+            gzs.append(make_trapezoid(channel='z', area=phase_areas[kz_idx[i]],
+                                      duration=calc_duration(dummy_trap), system=system))
+    elif kz_encoding_str == 'gaussian':
+        # Center-weighted ordering (adjust for your nkz)
+        if nkz == 16:
+            kz_idx = np.array([8,7,9,6,10,5,11,4,12,3,13,2,14,1,15,0])
+        else:
+            # Default center-out ordering
+            center = nkz // 2
+            kz_idx = np.zeros(nkz, dtype=int)
+            kz_idx[0] = center
+            for i in range(1, nkz):
+                if i % 2 == 1:
+                    kz_idx[i] = center + (i + 1) // 2
+                else:
+                    kz_idx[i] = center - i // 2
+            kz_idx = np.clip(kz_idx, 0, nkz - 1)
+
+        for i in range(0, len(kz_idx)):
+            gzs.append(make_trapezoid(channel='z', area=phase_areas[kz_idx[i]],
+                                      duration=calc_duration(dummy_trap), system=system))
+    elif kz_encoding_str == 'linear':
+        kz_idx = np.arange(nkz)
+        for i in range(0, nkz):
+            gzs.append(make_trapezoid(channel='z', area=phase_areas[i],
+                                      duration=calc_duration(dummy_trap), system=system))
+    else:
+        raise ValueError(f"Unknown kz encoding ordering: {kz_encoding_str}")
+
+    # Add the rotation_type to the encoding string
+    kz_encoding_str = kz_encoding_str + '_' + params['acquisition']['kz_encoding']['rotation_type']
+
+    print(f'3D acquisition: {n_arms} spiral arms x {nkz} kz partitions')
+    print(f'kz FOV: {kz_fov*1e3:.1f} mm, Resolution: {kz_fov*1e3/nkz:.2f} mm')
+
 # Set the delays
-# TE
+# TE - include kz gradient time for 3D
 if params['acquisition']['TE'] == 0:
     TEd = 0
     TE = rf.shape_dur - calc_rf_center(rf)[0] + calc_duration(gzr) - gzr.delay + gsp_x.delay
+    if acquisition_type == '3D':
+        TE = TE + calc_duration(gzs[0])
     print(f'Min TE is set: {TE*1e3:.3f} ms.')
     params['acquisition']['TE'] = TE
 else:
     TE = params['acquisition']['TE']*1e-3
     TEd = TE - (rf.shape_dur - calc_rf_center(rf)[0] + calc_duration(gzr) + gsp_x.delay)
+    if acquisition_type == '3D':
+        TEd = TEd - calc_duration(gzs[0])
     assert TEd >= 0, "Required TE can not be achieved."
 
-# TR
+# TR - include kz gradient time (encode + rewind) for 3D
 if params['acquisition']['TR'] == 0:
     TRd = 0
     TR = calc_duration(rf, gzz) + TEd + calc_duration(gsp_xs[0], gsp_ys[0], adc)
     if params['spiral']['contrast'] in ('FLASH', 'FISP'):
-        TR = TR + calc_duration(gz_crush) # pyright: ignore[reportPossiblyUnboundVariable]
+        TR = TR + calc_duration(gz_crush)
+    if acquisition_type == '3D':
+        TR = TR + (calc_duration(gzs[0]) * 2)  # encode + rewind
     print(f'Min TR is set: {TR*1e3:.3f} ms.')
     params['acquisition']['TR'] = TR
 else:
     TR = params['acquisition']['TR']*1e-3
     TRd = TR - (calc_duration(rf, gzz) + TEd + calc_duration(gsp_xs[0], gsp_ys[0], adc))
     if params['spiral']['contrast'] in ('FLASH', 'FISP'):
-        TRd = TRd - calc_duration(gz_crush) # pyright: ignore[reportPossiblyUnboundVariable]
+        TRd = TRd - calc_duration(gz_crush)
+    if acquisition_type == '3D':
+        TRd = TRd - (calc_duration(gzs[0]) * 2)
     assert TRd >= 0, "Required TR can not be achieved."
 
 TE_delay = make_delay(TEd)
 TR_delay = make_delay(TRd)
+
+# Calculate total TRs
+# For 3D: outer loop = arms, inner loop = kz partitions
+n_TRs = n_arms * nkz * params['acquisition']['repetitions']
 
 # Print temporal resolution summary
 print('\n')
@@ -408,21 +470,21 @@ print_temporal_summary(
     n_arms_total=n_TRs,
     temporal_res=temp_res_ms
 )
+print(f'Total TRs: {n_TRs} ({n_arms} arms x {nkz} kz x {params["acquisition"]["repetitions"]} reps)')
 
 # Sequence looping
-
 seq = Sequence(system)
 
 # handle any preparation pulses.
 prep_str = kernel_handle_preparations(seq, params, system, rf=rf, gz=gzz)
 
-# useful for end_peparation pulses.
+# useful for end_preparation pulses.
 params['flip_angle_last'] = params['acquisition']['flip_angle']
 
 # tagging pulse pre-prep (only if fa_schedule exists)
 rf_amplitudes, FA_schedule_str = schedule_FA(params, n_TRs)
 
-# used for FLASH only: set rf spoiling increment.
+# RF spoiling setup
 rf_phase = 0
 rf_inc = 0
 
@@ -439,38 +501,65 @@ else:
     params['spiral']['contrast'] = 'trueFISP'
 
 enable_trigger = True
-
 trig = make_digital_output_pulse(channel='ext1', duration=0.001, system=system)
 
 _, rf.shape_IDs = seq.register_rf_event(rf)
-for arm_i in range(0,n_TRs):
-    curr_rf = copy.deepcopy(rf)
 
-    # check if we are using a rammped FA scheme (rf_amplitudes is a list [])
-    if len(rf_amplitudes) > 0:
-        if arm_i >= len(rf_amplitudes):
-            n_TRs = arm_i
-            break
-        curr_rf.signal = rf.signal * rf_amplitudes[arm_i] / np.deg2rad(params['acquisition']['flip_angle'])
+# Main sequence loop
+# Outer loop: spiral arms
+# Inner loop: kz partitions
+tr_counter = 0
+for arm_i in range(n_arms):
+    for kz_i in range(len(gzs) if acquisition_type == '3D' else 1):
+        curr_rf = copy.deepcopy(rf)
 
-    curr_rf.phase_offset = rf_phase
-    adc.phase_offset = rf_phase
+        # Check if we are using a ramped FA scheme
+        if len(rf_amplitudes) > 0:
+            if tr_counter >= len(rf_amplitudes):
+                break
+            curr_rf.signal = rf.signal * rf_amplitudes[tr_counter] / np.deg2rad(params['acquisition']['flip_angle'])
 
-    rf_inc = np.mod(rf_inc + quadratic_phase_increment, np.pi * 2)
-    rf_phase = np.mod(rf_phase + linear_phase_increment + rf_inc, np.pi * 2)
+        curr_rf.phase_offset = rf_phase
+        adc.phase_offset = rf_phase
 
-    if enable_trigger is True:
-        seq.add_block(trig, curr_rf, gzz)
-    else:
-        seq.add_block(curr_rf, gzz)
+        rf_inc = np.mod(rf_inc + quadratic_phase_increment, np.pi * 2)
+        rf_phase = np.mod(rf_phase + linear_phase_increment + rf_inc, np.pi * 2)
 
-    seq.add_block(TE_delay)
-    seq.add_block(make_label('LIN', 'SET', arm_i % n_int))
-    seq.add_block(gsp_xs[arm_i % n_int], gsp_ys[arm_i % n_int], adc)
+        # RF excitation with trigger
+        if enable_trigger:
+            seq.add_block(trig, curr_rf, gzz)
+        else:
+            seq.add_block(curr_rf, gzz)
 
-    if params['spiral']['contrast'] in ('FLASH', 'FISP'):
-        seq.add_block(gz_crush) # pyright: ignore[reportPossiblyUnboundVariable]
-    seq.add_block(TR_delay)
+        # Add kz phase encoding gradient (3D only)
+        if acquisition_type == '3D':
+            seq.add_block(gzs[kz_i])
+
+        seq.add_block(TE_delay)
+
+        # LABEL extensions
+        if acquisition_type == '3D':
+            seq.add_block(make_label('PAR', 'SET', int(kz_idx[kz_i % len(kz_idx)])))
+        seq.add_block(make_label('LIN', 'SET', arm_i % len(gsp_xs)))
+
+        # Readout
+        seq.add_block(gsp_xs[arm_i % len(gsp_xs)], gsp_ys[arm_i % len(gsp_ys)], adc)
+
+        # kz rewinder (3D only) - negate the phase encoding
+        if acquisition_type == '3D':
+            gz_rewind = copy.deepcopy(gzs[kz_i])
+            gz_rewind.amplitude = -gz_rewind.amplitude
+            seq.add_block(gz_rewind)
+
+        # Crusher gradient (FLASH/FISP only)
+        if params['spiral']['contrast'] in ('FLASH', 'FISP'):
+            seq.add_block(gz_crush)
+
+        seq.add_block(TR_delay)
+        tr_counter += 1
+
+# Update n_TRs to actual count
+n_TRs = tr_counter
 
 # handle any end_preparation pulses.
 end_prep_str = kernel_handle_end_preparations(seq, params, system, rf=rf, gz=gzz)
@@ -486,44 +575,39 @@ else:
 
 # Plot the sequence
 if params['user_settings']['show_plots']:
-
-    # Plot first few TRs to avoid segfault with large sequences
-    try:
-        plot_duration = min(5 * TR, 0.1)  # Plot up to 5 TRs or 100ms max
-        seq.plot(show_blocks=True, grad_disp='mT/m', plot_now=True, time_disp='ms',
-                 time_range=[0, plot_duration])
-    except Exception as e:
-        print(f"\nWarning: Could not plot sequence: {e}")
-        print("Continuing without sequence plot...")
-
+    seq.plot(show_blocks=True, grad_disp='mT/m', plot_now=False, time_disp='ms')
     k_traj_adc, k_traj, t_excitation, t_refocusing, t_adc = seq.calculate_kspace()
-    plt.figure()
-    # Plot only readout trajectory (k_traj_adc), excluding rewinders
-    plt.plot(k_traj_adc[0,:], k_traj_adc[1, :])
 
-    # make axis square
-    plt.gca().set_aspect('equal', adjustable='box')
-    # double fontsize
+    if acquisition_type == '3D':
+        fig = plt.figure()
+        ax = fig.add_subplot(111, projection='3d')
+        ax.plot(k_traj_adc[0,:], k_traj_adc[1,:], k_traj_adc[2,:])
+        ax.set_xlabel('$k_x [mm^{-1}]$')
+        ax.set_ylabel('$k_y [mm^{-1}]$')
+        ax.set_zlabel('$k_z [mm^{-1}]$')
+        ax.set_title('3D k-Space Trajectory (HyperSLICE Stack-of-Spirals)')
+    else:
+        plt.figure()
+        plt.plot(k_traj_adc[0,:], k_traj_adc[1,:])
+        plt.gca().set_aspect('equal', adjustable='box')
+        plt.xlabel('$k_x [mm^{-1}]$')
+        plt.ylabel('$k_y [mm^{-1}]$')
+        plt.title('k-Space Trajectory - Readout Only (HyperSLICE Design)')
+
     plt.rcParams.update({'font.size': 14})
-
-    plt.xlabel('$k_x [mm^{-1}]$')
-    plt.ylabel('$k_y [mm^{-1}]$')
-    plt.title('k-Space Trajectory - Readout Only (HyperSLICE Design)')
-    plt.show()
 
     if 'acoustic_resonances' in params and 'frequencies' in params['acoustic_resonances']:
         resonances = []
         for idx in range(len(params['acoustic_resonances']['frequencies'])):
-            resonances.append({'frequency': params['acoustic_resonances']['frequencies'][idx], 'bandwidth': params['acoustic_resonances']['bandwidths'][idx]})
+            resonances.append({'frequency': params['acoustic_resonances']['frequencies'][idx],
+                             'bandwidth': params['acoustic_resonances']['bandwidths'][idx]})
         try:
             seq.calculate_gradient_spectrum(acoustic_resonances=resonances)
             plt.title('Gradient spectrum')
-            plt.show()
         except (ValueError, UserWarning) as e:
             print(f"\nWarning: Could not calculate gradient spectrum: {e}")
-            print("This may occur with very short sequences (few interleaves).")
             print("Continuing without acoustic resonance analysis...")
-
+    plt.show()
 
 # Detailed report if requested
 if params['user_settings']['detailed_rep']:
@@ -531,7 +615,6 @@ if params['user_settings']['detailed_rep']:
     rep_str = seq.test_report()
     print(rep_str)
 
-    # Add correct gradient information if using TensorFlow-MRI
     if USE_TENSORFLOW_MRI and 'trajectory' in locals():
         print("\n" + "="*60)
         print("IMPORTANT: ACTUAL GRADIENT VALUES (from TensorFlow-MRI)")
@@ -540,8 +623,6 @@ if params['user_settings']['detailed_rep']:
         print(f"Maximum Gradient: {max_grad:.1f} mT/m (actual)")
         print(f"Hardware Limit:   22.0 mT/m")
         print(f"Utilization:      {max_grad/22.0*100:.1f}%")
-        print("\nNOTE: PyPulseq test_report shows incorrect gradient values (~0.35 mT/m)")
-        print("      This is a display bug. The actual sequence uses correct gradients.")
         print("="*60 + "\n")
 
 # Write the sequence to file
@@ -549,39 +630,38 @@ if params['user_settings']['write_seq']:
 
     seq.set_definition(key="FOV", value=[fov[0]*1e-2, fov[0]*1e-2, params['acquisition']['slice_thickness']*1e-3])
     seq.set_definition(key="Slice_Thickness", value=params['acquisition']['slice_thickness']*1e-3)
-    seq.set_definition(key="Name", value="sprssfp_hyperslice")
+    seq.set_definition(key="Name", value="sprssfp_3d_hyperslice")
     seq.set_definition(key="TE", value=TE)
     seq.set_definition(key="TR", value=TR)
     seq.set_definition(key="FA", value=params['acquisition']['flip_angle'])
     seq.set_definition(key="Resolution_mm", value=res)
     seq.set_definition(key="Temporal_Res_ms", value=temp_res_ms)
+    if acquisition_type == '3D':
+        seq.set_definition(key="kz_partitions", value=nkz)
 
     m1_str = "M1" if params['spiral']['M1_nulling'] else ""
     rev_str = "rev" if reverse_traj else ""
-    seq_filename = f"spiral_hs_{params['spiral']['contrast']}{FA_schedule_str}{prep_str}{end_prep_str}_{hs_ordering}{params['spiral']['GA_angle']:.4f}_nTR{n_TRs}_views{views}_Tread{ro_time_ms:.2f}_Tres{temp_res_ms:.1f}_TR{TR*1e3:.2f}ms_FA{params['acquisition']['flip_angle']}_{m1_str}_{rev_str}_{params['user_settings']['filename_ext']}"
+    seq_filename = f"spiral_3d_hs_{kz_encoding_str}_{params['spiral']['contrast']}{FA_schedule_str}{prep_str}{end_prep_str}_{hs_ordering}{params['spiral']['GA_angle']:.4f}_nTR{n_TRs}_arms{n_arms}_kz{nkz}_Tread{ro_time_ms:.2f}_TR{TR*1e3:.2f}ms_FA{params['acquisition']['flip_angle']}_{m1_str}_{rev_str}_{params['user_settings']['filename_ext']}"
 
     # remove double, triple, quadruple underscores, and trailing underscores
     seq_filename = seq_filename.replace("__", "_").replace("__", "_").replace("__", "_").strip("_")
 
     seq_path = os.path.join('out_seq', f"{seq_filename}.seq")
 
-    # ensure the out_seq directory exists before writing.
     os.makedirs("out_seq", exist_ok=True)
-
-    seq.write(seq_path)  # Save to disk
+    seq.write(seq_path)
 
     # Export k-space trajectory
     k_traj_adc, k_traj, t_excitation, t_refocusing, t_adc = seq.calculate_kspace()
 
-    # Set ndiscard value for saving
-    ndiscard = 10
-
-    # save_traj_dcf(seq.signature_value, k_traj_adc, n_TRs, n_int, fov, res, ndiscard, params['user_settings']['show_plots'])
+    # Save metadata
     params_save = {
         'adc_dwell': spiral_sys['adc_dwell'],
         'ndiscard': ndiscard,
         'n_TRs': n_TRs,
         'n_int': n_int,
+        'n_arms': n_arms,
+        'nkz': nkz,
         'ga_rotation': params['spiral']['GA_angle'],
         'fov': fov,
         'spatial_resolution': res,
@@ -595,13 +675,17 @@ if params['user_settings']['write_seq']:
         'vd_inner_cutoff': vd_inner_cutoff,
         'vd_outer_density': vd_outer_density,
         'reverse_traj': reverse_traj,
+        # 3D-specific metadata
+        'acquisition_type': acquisition_type,
+        'kz_encoding': kz_encoding_str if acquisition_type == '3D' else None,
+        'kz_fov_mm': params['acquisition']['kz_encoding']['FOV'] if acquisition_type == '3D' else None,
     }
-    save_metadata(seq.signature_value, k_traj_adc, params_save, params['user_settings']['show_plots'], dcf_method="hoge", out_dir="out_trajectory")
+    save_metadata(seq.signature_value, k_traj_adc, params_save, params['user_settings']['show_plots'],
+                  dcf_method="hoge", out_dir="out_trajectory")
 
     print(f'\nMetadata file for {seq_filename} is saved as {seq.signature_value} in out_trajectory/.')
 
-    # Save readout-only trajectory and gradient waveforms
-    # Create output directory if it doesn't exist
+    # Save readout trajectory and gradient waveforms
     traj_dir = Path("out_trajectory")
     traj_dir.mkdir(exist_ok=True)
 
@@ -609,60 +693,50 @@ if params['user_settings']['write_seq']:
     if USE_TENSORFLOW_MRI:
         grad_filename = traj_dir / f"{seq.signature_value}_gradients.mat"
 
-        # Get full gradient waveforms from TensorFlow-MRI trajectory
         grad_data = {
-            'gx': trajectory['gx'],  # [n_arms, n_samples] in mT/m
-            'gy': trajectory['gy'],  # [n_arms, n_samples] in mT/m
-            'kx': trajectory['kx'],  # [n_arms, n_samples] in rad/m
-            'ky': trajectory['ky'],  # [n_arms, n_samples] in rad/m
+            'gx': trajectory['gx'],
+            'gy': trajectory['gy'],
+            'kx': trajectory['kx'],
+            'ky': trajectory['ky'],
             'n_arms': trajectory['n_arms'],
             'n_samples_per_arm': trajectory['n_samples'],
-            'dwell_time': trajectory['dwell_time'],  # in seconds
+            'dwell_time': trajectory['dwell_time'],
             'readout_time_ms': trajectory['readout_time'],
-            'fov_mm': fov[0] * 10,  # cm to mm
+            'fov_mm': fov[0] * 10,
             'base_resolution': base_resolution,
+            'nkz': nkz,
+            'acquisition_type': acquisition_type,
         }
 
         sio.savemat(grad_filename, grad_data)
         print(f'Gradient waveforms saved to: {grad_filename}')
 
-    # For TensorFlow-MRI, handle trajectory saving based on ordering scheme
+    # Save trajectory data
     if USE_TENSORFLOW_MRI:
         n_unique_arms = trajectory['n_arms']
         n_samples_per_arm = trajectory['n_samples']
 
-        # For golden angle, each TR needs a unique rotated trajectory
-        # For linear, we only need the base arms
         if hs_ordering in ['golden', 'ga', 'tinyga']:
-            # Golden angle ordering: take first arm and rotate it
             kx_all = []
             ky_all = []
-            rotation_angles_deg = []  # Store rotation angle for each trajectory in degrees
-            rotation_angles_rad = []  # Store rotation angle for each trajectory in radians
+            rotation_angles_deg = []
+            rotation_angles_rad = []
 
-            # Golden angle in radians and degrees
             golden_angle_deg = params['spiral']['GA_angle']
             golden_angle_rad = golden_angle_deg * np.pi / 180
 
-            # Get number of unique rotations from config (default to n_unique_arms)
-            # First check in hyperslice section, then spiral section, then default
             n_unique_ga_rotations = params['spiral'].get('hyperslice', {}).get('n_unique_rotations',
                                     params['spiral'].get('n_unique_rotations', n_unique_arms))
 
-            # For golden angle: take the FIRST trajectory and rotate it n_unique_ga_rotations times
-            # Get the base trajectory (first arm only)
-            kx_base = trajectory['kx'][0, :] / (2 * np.pi)  # Convert rad/m to 1/m
+            kx_base = trajectory['kx'][0, :] / (2 * np.pi)
             ky_base = trajectory['ky'][0, :] / (2 * np.pi)
 
-            # Generate n_unique_ga_rotations by rotating the base trajectory
             for rot in range(n_unique_ga_rotations):
-                # Calculate rotation angle for this unique rotation
                 rotation_angle_rad = rot * golden_angle_rad
                 rotation_angle_deg = rot * golden_angle_deg
                 rotation_angles_rad.append(rotation_angle_rad)
                 rotation_angles_deg.append(rotation_angle_deg)
 
-                # Apply rotation
                 cos_theta = np.cos(rotation_angle_rad)
                 sin_theta = np.sin(rotation_angle_rad)
                 kx_rotated = kx_base * cos_theta - ky_base * sin_theta
@@ -671,147 +745,122 @@ if params['user_settings']['write_seq']:
                 kx_all.extend(kx_rotated)
                 ky_all.extend(ky_rotated)
 
-            # Convert to numpy arrays
             kx_all = np.array(kx_all)
             ky_all = np.array(ky_all)
             rotation_angles_deg = np.array(rotation_angles_deg)
             rotation_angles_rad = np.array(rotation_angles_rad)
 
-            # Total saved trajectories = n_unique_ga_rotations
             n_saved_trajectories = n_unique_ga_rotations
+            kx_reshaped = kx_all.reshape(n_saved_trajectories, n_samples_per_arm).T
+            ky_reshaped = ky_all.reshape(n_saved_trajectories, n_samples_per_arm).T
+            n_saved_rotations = n_saved_trajectories
 
-            # Reshape for [dim, RO, INT] format
-            kx_reshaped = kx_all.reshape(n_saved_trajectories, n_samples_per_arm).T  # [RO, INT]
-            ky_reshaped = ky_all.reshape(n_saved_trajectories, n_samples_per_arm).T  # [RO, INT]
-
-            n_saved_rotations = n_saved_trajectories  # Total unique trajectories saved
-
-            print(f"Golden angle trajectory: 1 base arm × {n_unique_ga_rotations} rotations = {n_saved_trajectories} unique trajectories")
+            print(f"Golden angle trajectory: 1 base arm x {n_unique_ga_rotations} rotations = {n_saved_trajectories} unique trajectories")
 
         else:
-            # Linear ordering: only save the base arms without rotation
             kx_all = []
             ky_all = []
 
             for arm_idx in range(n_unique_arms):
-                # Get k-space trajectory for this arm (already in rad/m)
-                kx_arm = trajectory['kx'][arm_idx, :] / (2 * np.pi)  # Convert rad/m to 1/m
+                kx_arm = trajectory['kx'][arm_idx, :] / (2 * np.pi)
                 ky_arm = trajectory['ky'][arm_idx, :] / (2 * np.pi)
-
                 kx_all.extend(kx_arm)
                 ky_all.extend(ky_arm)
 
-            # Convert to numpy arrays
             kx_all = np.array(kx_all)
             ky_all = np.array(ky_all)
 
-            # Reshape for [dim, RO, INT] format
-            kx_reshaped = kx_all.reshape(n_unique_arms, n_samples_per_arm).T  # [RO, INT]
-            ky_reshaped = ky_all.reshape(n_unique_arms, n_samples_per_arm).T  # [RO, INT]
+            kx_reshaped = kx_all.reshape(n_unique_arms, n_samples_per_arm).T
+            ky_reshaped = ky_all.reshape(n_unique_arms, n_samples_per_arm).T
+            n_saved_rotations = n_unique_arms
 
-            n_saved_rotations = n_unique_arms  # Only save base arms for linear
-
-        # Stack to create [dim, RO, INT]
-        traj = np.stack([kx_reshaped, ky_reshaped], axis=0)  # [2, RO, INT]
-
-        # Create time array for ADC samples
+        traj = np.stack([kx_reshaped, ky_reshaped], axis=0)
         t_adc_tfmri = np.arange(len(kx_all)) * trajectory['dwell_time']
 
-        # Save comprehensive trajectory parameters for reconstruction
         traj_params = {
-            # HyperSLICE parameters
             'base_resolution': base_resolution,
             'vd_spiral_arms': vd_spiral_arms,
             'vd_inner_cutoff': vd_inner_cutoff,
             'pre_vd_outer_cutoff': pre_vd_outer_cutoff,
             'vd_outer_density': vd_outer_density,
             'vd_type': vd_type,
-
-            # Hardware parameters
-            'max_grad_ampl': trajectory.get('max_grad_ampl', 22.0),  # mT/m
-            'max_slew_rate': trajectory.get('max_slew_rate', 120.0),  # T/m/s
-            'grad_raster_time': GRT,  # s
-
-            # Timing parameters
-            'readout_time_ms': trajectory['readout_time'],  # ms
-            'dwell_time': trajectory['dwell_time'],  # s
-            'TR_ms': TR * 1e3,  # ms
-            'deadtime_ms': params['spiral']['hyperslice'].get('deadtime', 0.5),  # ms
-
-            # Trajectory generation method
+            'max_grad_ampl': trajectory.get('max_grad_ampl', 22.0),
+            'max_slew_rate': trajectory.get('max_slew_rate', 120.0),
+            'grad_raster_time': GRT,
+            'readout_time_ms': trajectory['readout_time'],
+            'dwell_time': trajectory['dwell_time'],
+            'TR_ms': TR * 1e3,
+            'deadtime_ms': params['spiral']['hyperslice'].get('deadtime', 0.5),
             'generation_method': 'TensorFlow-MRI',
             'trajectory_type': 'spiral',
             'variable_density': True,
-
-            # k-space extent
-            'k_max': np.sqrt(np.max(kx_all**2 + ky_all**2)),  # 1/m
-            'k_nyquist': 0.5 / (fov[0] * 10 / base_resolution),  # 1/m (FOV in cm -> m)
+            'k_max': np.sqrt(np.max(kx_all**2 + ky_all**2)),
+            'k_nyquist': 0.5 / (fov[0] * 10 / base_resolution),
+            'acquisition_type': acquisition_type,
+            'nkz': nkz,
         }
 
-        # Add rotation angles for golden angle
         if hs_ordering in ['golden', 'ga', 'tinyga']:
             rotation_data = {
-                'rotation_angles_deg': rotation_angles_deg,  # Rotation angle for each trajectory [degrees]
-                'rotation_angles_rad': rotation_angles_rad,  # Rotation angle for each trajectory [radians]
-                'golden_angle_deg': golden_angle_deg,  # Base golden angle [degrees]
-                'golden_angle_rad': golden_angle_rad,  # Base golden angle [radians]
+                'rotation_angles_deg': rotation_angles_deg,
+                'rotation_angles_rad': rotation_angles_rad,
+                'golden_angle_deg': golden_angle_deg,
+                'golden_angle_rad': golden_angle_rad,
             }
         else:
             rotation_data = None
 
         readout_traj = {
-            'kx': kx_all,  # k-space x coordinates [1/m]
-            'ky': ky_all,  # k-space y coordinates [1/m]
-            'traj': traj,   # trajectory organized as [dim, RO, INT]
-            't': t_adc_tfmri,  # time points during ADC [s]
-            'n_rotations': n_saved_rotations,    # number of saved rotations
-            'n_samples_per_rotation': n_samples_per_arm,  # ADC samples per rotation
-            'adc_dwell': trajectory['dwell_time'],  # ADC dwell time [s]
-            'fov': fov[0],           # field of view [cm]
-            'resolution': res,       # spatial resolution [mm]
-            'base_resolution': base_resolution,  # HyperSLICE base resolution
-            'temporal_resolution_ms': temp_res_ms,  # temporal resolution [ms]
-            'ordering': hs_ordering,  # arm ordering scheme
-            'ga_angle': params['spiral']['GA_angle'],  # golden angle [deg]
-            'n_base_arms': n_unique_arms,  # number of base spiral arms
+            'kx': kx_all,
+            'ky': ky_all,
+            'traj': traj,
+            't': t_adc_tfmri,
+            'n_rotations': n_saved_rotations,
+            'n_samples_per_rotation': n_samples_per_arm,
+            'adc_dwell': trajectory['dwell_time'],
+            'fov': fov[0],
+            'resolution': res,
+            'base_resolution': base_resolution,
+            'temporal_resolution_ms': temp_res_ms,
+            'ordering': hs_ordering,
+            'ga_angle': params['spiral']['GA_angle'],
+            'n_base_arms': n_unique_arms,
             'n_unique_ga_rotations': n_unique_ga_rotations if hs_ordering in ['golden', 'ga', 'tinyga'] else 0,
-            'total_TRs': n_TRs,      # total number of TRs in sequence
-            'traj_params': traj_params,  # Comprehensive trajectory parameters
+            'total_TRs': n_TRs,
+            'traj_params': traj_params,
+            'acquisition_type': acquisition_type,
+            'nkz': nkz,
         }
 
-        # Add rotation data if available
         if rotation_data is not None:
             readout_traj['rotation_data'] = rotation_data
     else:
-        # Original code for non-TensorFlow-MRI trajectories
-        # Extract readout trajectory from PyPulseq calculation
-        kx_reshaped = k_traj_adc[0, :].reshape(n_TRs, int(num_samples)).T  # [RO, INT]
-        ky_reshaped = k_traj_adc[1, :].reshape(n_TRs, int(num_samples)).T  # [RO, INT]
-
-        # Stack to create [dim, RO, INT]
-        traj = np.stack([kx_reshaped, ky_reshaped], axis=0)  # [2, RO, INT]
+        kx_reshaped = k_traj_adc[0, :].reshape(n_TRs, int(num_samples)).T
+        ky_reshaped = k_traj_adc[1, :].reshape(n_TRs, int(num_samples)).T
+        traj = np.stack([kx_reshaped, ky_reshaped], axis=0)
 
         readout_traj = {
-            'kx': k_traj_adc[0, :],  # k-space x coordinates [1/m] - original flat format
-            'ky': k_traj_adc[1, :],  # k-space y coordinates [1/m] - original flat format
-            'traj': traj,            # trajectory organized as [dim, RO, INT]
-            't': t_adc,              # time points during ADC [s]
-            'n_rotations': n_TRs,    # number of spiral rotations
-            'n_samples_per_rotation': int(num_samples),  # ADC samples per rotation
-            'adc_dwell': spiral_sys['adc_dwell'],  # ADC dwell time [s]
-            'fov': fov[0],           # field of view [cm]
-            'resolution': res,       # spatial resolution [mm]
-            'base_resolution': base_resolution,  # HyperSLICE base resolution
-            'temporal_resolution_ms': temp_res_ms,  # temporal resolution [ms]
-            'ordering': hs_ordering,  # arm ordering scheme
-            'ga_angle': params['spiral']['GA_angle'],  # golden angle [deg]
+            'kx': k_traj_adc[0, :],
+            'ky': k_traj_adc[1, :],
+            'kz': k_traj_adc[2, :] if acquisition_type == '3D' else None,
+            'traj': traj,
+            't': t_adc,
+            'n_rotations': n_TRs,
+            'n_samples_per_rotation': int(num_samples),
+            'adc_dwell': spiral_sys['adc_dwell'],
+            'fov': fov[0],
+            'resolution': res,
+            'base_resolution': base_resolution,
+            'temporal_resolution_ms': temp_res_ms,
+            'ordering': hs_ordering,
+            'ga_angle': params['spiral']['GA_angle'],
+            'acquisition_type': acquisition_type,
+            'nkz': nkz,
         }
 
-    # Save to .mat file with descriptive filename
     traj_filename = traj_dir / f"{seq.signature_value}_readout.mat"
     sio.savemat(traj_filename, {'k_readout': readout_traj})
 
     print(f'Readout trajectory saved to {traj_filename}.')
-
 
 # %%
