@@ -211,16 +211,17 @@ if reverse_traj:
 t_grad, g_grad = raster_to_grad(g, spiral_sys['adc_dwell'], GRT)
 
 # Design rewinder
-if params['spiral']['rotate_grads']:
+# Only rotate gradients if both rotate_grads=True AND grad_rew_method='gropt'
+if params['spiral']['rotate_grads'] and params['spiral']['grad_rew_method'] == 'gropt':
     g_rewind_x, g_rewind_y, g_grad = design_rewinder(g_grad, params['spiral']['rewinder_time'], system, # type: ignore
                                              slew_ratio=params['spiral']['slew_ratio'],
                                              grad_rew_method=params['spiral']['grad_rew_method'],
-                                             M1_nulling=params['spiral']['M1_nulling'], rotate_grads=params['spiral']['rotate_grads'])
+                                             M1_nulling=params['spiral']['M1_nulling'], rotate_grads=True)
 else:
     g_rewind_x, g_rewind_y = design_rewinder(g_grad, params['spiral']['rewinder_time'], system, # type: ignore
                                              slew_ratio=params['spiral']['slew_ratio'],
                                              grad_rew_method=params['spiral']['grad_rew_method'],
-                                             M1_nulling=params['spiral']['M1_nulling'])
+                                             M1_nulling=params['spiral']['M1_nulling'], rotate_grads=False)
 
 # concatenate g and g_rewind, and plot.
 g_grad = np.concatenate((g_grad, np.stack([g_rewind_x[0:], g_rewind_y[0:]]).T))
@@ -228,18 +229,30 @@ g_grad = np.concatenate((g_grad, np.stack([g_rewind_x[0:], g_rewind_y[0:]]).T))
 if params['user_settings']['show_plots']:
     # Use enhanced plotting if available
     if USE_TENSORFLOW_MRI and plot_trajectory_summary and 'trajectory' in locals():
-        # Show the enhanced trajectory plot
-        fig = plot_trajectory_summary(trajectory, params)
-        plt.show()
+        try:
+            # Show the enhanced trajectory plot
+            fig = plot_trajectory_summary(trajectory, params)
+            plt.show()
+        except Exception as e:
+            print(f"\nWarning: Could not plot trajectory summary: {e}")
+            print("Continuing without trajectory summary plot...")
 
         # Also show the gradient correction info
         if plot_gradient_correction_info:
-            info_fig = plot_gradient_correction_info()
-            plt.show()
+            try:
+                info_fig = plot_gradient_correction_info()
+                plt.show()
+            except Exception as e:
+                print(f"\nWarning: Could not plot gradient correction info: {e}")
+                print("Continuing without gradient correction plot...")
 
     # Also show the standard gradient info plot
-    plotgradinfo(g_grad, GRT)
-    plt.show()
+    try:
+        plotgradinfo(g_grad, GRT)
+        plt.show()
+    except Exception as e:
+        print(f"\nWarning: Could not plot gradient info: {e}")
+        print("Continuing without gradient info plot...")
 
 #%%
 # Excitation
@@ -496,20 +509,36 @@ if params['user_settings']['show_plots']:
         print(f"\nWarning: Could not plot sequence: {e}")
         print("Continuing without sequence plot...")
 
-    k_traj_adc, k_traj, t_excitation, t_refocusing, t_adc = seq.calculate_kspace()
-    plt.figure()
-    # Plot only readout trajectory (k_traj_adc), excluding rewinders
-    plt.plot(k_traj_adc[0,:], k_traj_adc[1, :])
+    try:
+        k_traj_adc, k_traj, t_excitation, t_refocusing, t_adc = seq.calculate_kspace()
 
-    # make axis square
-    plt.gca().set_aspect('equal', adjustable='box')
-    # double fontsize
-    plt.rcParams.update({'font.size': 14})
+        # For large sequences, only plot a subset of the trajectory
+        max_points = 50000  # Limit to avoid segfault
+        total_points = k_traj_adc.shape[1]
 
-    plt.xlabel('$k_x [mm^{-1}]$')
-    plt.ylabel('$k_y [mm^{-1}]$')
-    plt.title('k-Space Trajectory - Readout Only (HyperSLICE Design)')
-    plt.show()
+        if total_points > max_points:
+            print(f"\nNote: Plotting {max_points} of {total_points} k-space points to avoid memory issues")
+            step = total_points // max_points
+            k_plot = k_traj_adc[:, ::step]
+        else:
+            k_plot = k_traj_adc
+
+        plt.figure()
+        # Plot only readout trajectory (k_traj_adc), excluding rewinders
+        plt.plot(k_plot[0,:], k_plot[1, :], linewidth=0.5)
+
+        # make axis square
+        plt.gca().set_aspect('equal', adjustable='box')
+        # double fontsize
+        plt.rcParams.update({'font.size': 14})
+
+        plt.xlabel('$k_x [mm^{-1}]$')
+        plt.ylabel('$k_y [mm^{-1}]$')
+        plt.title('k-Space Trajectory - Readout Only (HyperSLICE Design)')
+        plt.show()
+    except Exception as e:
+        print(f"\nWarning: Could not plot k-space trajectory: {e}")
+        print("Continuing without k-space plot...")
 
     if 'acoustic_resonances' in params and 'frequencies' in params['acoustic_resonances']:
         resonances = []

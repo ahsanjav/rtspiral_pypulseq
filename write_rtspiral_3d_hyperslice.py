@@ -208,16 +208,17 @@ if reverse_traj:
 t_grad, g_grad = raster_to_grad(g, spiral_sys['adc_dwell'], GRT)
 
 # Design rewinder
-if params['spiral']['rotate_grads']:
+# Only rotate gradients if both rotate_grads=True AND grad_rew_method='gropt'
+if params['spiral']['rotate_grads'] and params['spiral']['grad_rew_method'] == 'gropt':
     g_rewind_x, g_rewind_y, g_grad = design_rewinder(g_grad, params['spiral']['rewinder_time'], system,
                                              slew_ratio=params['spiral']['slew_ratio'],
                                              grad_rew_method=params['spiral']['grad_rew_method'],
-                                             M1_nulling=params['spiral']['M1_nulling'], rotate_grads=params['spiral']['rotate_grads'])
+                                             M1_nulling=params['spiral']['M1_nulling'], rotate_grads=True)
 else:
     g_rewind_x, g_rewind_y = design_rewinder(g_grad, params['spiral']['rewinder_time'], system,
                                              slew_ratio=params['spiral']['slew_ratio'],
                                              grad_rew_method=params['spiral']['grad_rew_method'],
-                                             M1_nulling=params['spiral']['M1_nulling'])
+                                             M1_nulling=params['spiral']['M1_nulling'], rotate_grads=False)
 
 # concatenate g and g_rewind, and plot.
 g_grad = np.concatenate((g_grad, np.stack([g_rewind_x[0:], g_rewind_y[0:]]).T))

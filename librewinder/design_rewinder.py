@@ -55,7 +55,7 @@ def design_rewinder(g_grad, T_rew, system, slew_ratio=0.7, grad_rew_method='grop
     """Design_rewinder for spiral trajectories.
 
     Inputs:
-        g_grad: array [readout x 2] in units mT/m 
+        g_grad: array [readout x 2] in units mT/m
         GRT: gradient raster time (s)
         T_rew: time for rewind (s)
         system: pulseq system object (containing max grad, slew, and other hardware limits)
@@ -65,11 +65,16 @@ def design_rewinder(g_grad, T_rew, system, slew_ratio=0.7, grad_rew_method='grop
         rotate_grads: true or false (to rotate gradients for optimal rewinding timing)
 
     Returns:
-        g_rewind_x 
+        g_rewind_x
         g_rewind_y
         g_rotated: Rotated gradients. Returned if rotate_grads is True
     """
     GRT = system.grad_raster_time
+
+    # Warn if rotate_grads is True but method doesn't support it
+    if rotate_grads and grad_rew_method != 'gropt':
+        warnings.warn(f"rotate_grads is only supported with 'gropt' method, not '{grad_rew_method}'. Ignoring rotate_grads.")
+        rotate_grads = False
 
     # === design rewinder ===
     M0, M1 = calculate_moments(g_grad, GRT)

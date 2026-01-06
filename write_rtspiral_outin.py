@@ -10,7 +10,7 @@ from pypulseq.Sequence.sequence import Sequence
 from utils import schedule_FA, load_params
 from utils.traj_utils import save_metadata
 from libspiral import vds_fixed_ro, plotgradinfo, raster_to_grad
-from librewinder.design_rewinder import design_rewinder
+# from librewinder.design_rewinder import design_rewinder
 from kernels.kernel_handle_preparations import kernel_handle_preparations, kernel_handle_end_preparations
 from math import ceil
 import copy
@@ -69,20 +69,30 @@ if g is None:
 
 t_grad, g_grad = raster_to_grad(g, spiral_sys['adc_dwell'], GRT)
 
-# Only rotate gradients if both rotate_grads=True AND grad_rew_method='gropt'
-if params['spiral']['rotate_grads'] and params['spiral']['grad_rew_method'] == 'gropt':
-    g_rewind_x, g_rewind_y, g_grad = design_rewinder(g_grad, params['spiral']['rewinder_time'], system, # type: ignore
-                                             slew_ratio=params['spiral']['slew_ratio'],
-                                             grad_rew_method=params['spiral']['grad_rew_method'],
-                                             M1_nulling=params['spiral']['M1_nulling'], rotate_grads=True)
-else:
-    g_rewind_x, g_rewind_y = design_rewinder(g_grad, params['spiral']['rewinder_time'], system, # type: ignore
-                                             slew_ratio=params['spiral']['slew_ratio'],
-                                             grad_rew_method=params['spiral']['grad_rew_method'],
-                                             M1_nulling=params['spiral']['M1_nulling'], rotate_grads=False)
+# Out-In-Out (Mirrored) Trajectory Implementation
+# 1. Spiral Out (already in g_grad)
+# 2. Spiral In = -Flip(Spiral Out)
+g_in = -1 * np.flip(g_grad, axis=0)
 
-# concatenate g and g_rewind, and plot.
-g_grad = np.concatenate((g_grad, np.stack([g_rewind_x[0:], g_rewind_y[0:]]).T))
+# 3. Bridge (Out -> In Transition)
+# Symmetrical Zero-Sum Ramp: G_end -> 0 -> -G_end
+g_end = g_grad[-1, :]
+max_dG = spiral_sys['max_slew'] * GRT
+ramp_steps = max(int(np.ceil(np.max(np.abs(g_end)) / max_dG)), 2)
+
+bridge_x_half = np.linspace(g_end[0], 0, ramp_steps + 1)[1:]
+bridge_y_half = np.linspace(g_end[1], 0, ramp_steps + 1)[1:]
+bridge_x = np.concatenate([bridge_x_half, -1 * np.flip(bridge_x_half)])
+bridge_y = np.concatenate([bridge_y_half, -1 * np.flip(bridge_y_half)])
+
+if g_grad.shape[1] == 2:
+    g_bridge = np.stack([bridge_x, bridge_y], axis=1)
+else:
+    bridge_z = np.zeros(len(bridge_x))
+    g_bridge = np.stack([bridge_x, bridge_y, bridge_z], axis=1)
+
+# Concatenate
+g_grad = np.concatenate((g_grad, g_bridge, g_in), axis=0)
 
 if params['user_settings']['show_plots']:
     plotgradinfo(g_grad, GRT)
@@ -107,7 +117,7 @@ gzz = add_gradients([gzrr, gz, gzr], system=system)
 
 # ADC
 ndiscard = 10 # Number of samples to discard from beginning
-num_samples = np.floor(Tread/spiral_sys['adc_dwell']) + ndiscard
+num_samples = np.floor(len(g_grad) * GRT / spiral_sys['adc_dwell']) + ndiscard
 adc = make_adc(num_samples, dwell=spiral_sys['adc_dwell'], delay=0, system=system)
 
 # NOTE: we shift by GRT/2 and round to GRT because the grads will be shifted by GRT/2, and if we don't, last GRT/2 ADC samples discarded will be non-zero k-space.
@@ -293,7 +303,12 @@ if params['user_settings']['show_plots']:
     seq.plot(show_blocks=True, grad_disp='mT/m', plot_now=False, time_disp='ms')
     k_traj_adc, k_traj, t_excitation, t_refocusing, t_adc = seq.calculate_kspace()
     plt.figure()
-    plt.plot(k_traj[0,:], k_traj[1, :])
+    plt.plot(k_traj[0,:], k_traj[1, :], label='Full Trajectory')
+    
+    # Highlight the first TR to show the spiral shape
+    pts_per_tr = int(k_traj.shape[1] / n_TRs)
+    plt.plot(k_traj[0, :pts_per_tr], k_traj[1, :pts_per_tr], 'r-', linewidth=2, label='First Spiral Arm')
+    plt.legend()
 
     # make axis suqaure
     plt.gca().set_aspect('equal', adjustable='box')

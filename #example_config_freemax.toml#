@@ -22,7 +22,7 @@
 
 [system]
 max_grad          =     22 # [mT/m] From HyperSLICE config_optimized_traj()
-max_slew          =    120 # [T/m/s] Adjusted for rtspiral implementation
+max_slew          =    40 # [T/m/s] Adjusted for rtspiral implementation
 grad_raster_time  =  10e-6 # [s]
 rf_raster_time    =   1e-6 # [s]
 rf_ringdown_time  =  10e-6 # [s]
@@ -39,14 +39,14 @@ adc_dwell   = 2.0e-6 # [s] ADC sample dwell time (from HyperSLICE source code)
 # Rewinder configuration (same as standard mode)
 grad_rew_method = 'ext_trap_area' # 'gropt', 'ext_trap_area', 'exact_time', 'm1_nayak'
                                    # Using ext_trap_area to avoid gropt issues
-rewinder_time   = 0.5e-3 # [s] Max rewinder time (increased for deadtime)
+rewinder_time   = 1.0e-3 # [s] Max rewinder time (increased for deadtime)
 M1_nulling      = true  # First moment nulling for flow compensation
 rotate_grads    = false  # Rotate gradients for optimal timing
 
 # HyperSLICE-specific parameters - OPTIMIZED
 [spiral.hyperslice]
 # Base resolution (matrix size)
-base_resolution = 240  # Base matrix size (240x240, gives 1.67mm pixel at 40cm FOV)
+base_resolution = 320  # Base matrix size (240x240, gives 1.67mm pixel at 40cm FOV)
 
 # Spiral arm configuration
 # From HyperSLICE source: config_optimized_traj()
@@ -57,7 +57,7 @@ optimize_arms = false  # Use exact spiral arm count (true = optimize to fit timi
 # Source: https://github.com/mrphys/HyperSLICE/blob/master/utils/preprocessing_trajectory_gen.py
 vd_inner_cutoff = 0.15      # Normalized radius (0-1) where undersampling starts
                              # 0.15 = fully sample inner 15% of k-space (HyperSLICE value)
-pre_vd_outer_cutoff = 0.41288  # Offset for outer cutoff calculation (HyperSLICE exact value)
+pre_vd_outer_cutoff = 0.41  # Offset for outer cutoff calculation (HyperSLICE exact value)
                                 # This achieves the desired outer cutoff with HyperSLICE formula
 vd_outer_density = 0.07     # Final density at edge (0-1)
                              # 0.07 = 7% of Nyquist = ~14x undersampling at edge
@@ -97,7 +97,7 @@ slice_thickness = 8       # [mm]
 tbwp            = 2       # Time-bandwidth product for RF pulse
 
 # RF parameters
-flip_angle      = 35    # [deg]
+flip_angle      = 70    # [deg]
 rf_duration     = 0.5e-3  # [s]
 
 # Timing (use 0 for minimum)
@@ -105,12 +105,12 @@ TR              = 0     # [ms], 0 for min TR
 TE              = 0     # [ms], 0 for min TE
 
 # Acquisition parameters
-repetitions     = 4    # Number of times to repeat the sequence
+repetitions     = 100    # Number of times to repeat the sequence
 
 [user_settings]
 write_seq    = true
-filename_ext = 'test_hs' # This will be attached to the filename
-show_plots   = true      # Disable plots to avoid hanging
+filename_ext = 'm1_hs' # This will be attached to the filename
+show_plots   = false      # Disable plots to avoid hanging
 detailed_rep = true
 
 [acoustic_resonances]

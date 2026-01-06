@@ -390,19 +390,29 @@ def vds_design(sys: dict, Nint: int, fov: list, res: float, Tread: float) -> tup
 
     return k, g, s, time
 
-def vds_fixed_ro(sys: dict, fov: list, res: float, Tread: float) -> tuple[npt.NDArray | None, npt.NDArray | None, npt.NDArray | None, int]:
-    """vds_fixed_ro Sweeps vdsmex until N interleaves found that satisfies desired res.
+def spiralgen_fixed_ro(sys: dict, fov: float, res: float, Tread: float,
+                        us_factor: float = 1.0, us_type: str = 'linear',
+                        us_transition: tuple[float, float] = (0.0, 1.0)) -> tuple[npt.NDArray | None, npt.NDArray | None, npt.NDArray | None, int]:
+    """spiralgen_fixed_ro Sweeps spiralgen until N interleaves found that satisfies desired res.
+
+    Uses James Pipe's spiralgen with explicit variable density control.
 
     Parameters
     ----------
     sys : dict
-        Contains the system specs for the design, 'max_slew', 'max_grad', 'Tdwell', 'os'
-    FOV : list
-        Desired Field of View(s) [cm]
+        Contains system specs: 'max_slew', 'max_grad', 'spiral_type' (0=Archimedean, 3=Fermat)
+    fov : float
+        Desired Field of View [m]
     res : float
         Desired resolution [mm]
-    Tread : float 
-        Desired readout length [s] (RO Duration = Npoints*Ts)
+    Tread : float
+        Desired readout length [s]
+    us_factor : float
+        Undersampling factor at outer k-space (1.0 = Nyquist, >1.0 = undersampled)
+    us_type : str
+        Undersampling transition type: 'linear', 'quadratic', or 'hanning'
+    us_transition : tuple
+        (us_0, us_1) normalized radii where undersampling starts and ends
 
     Returns
     -------
@@ -413,7 +423,7 @@ def vds_fixed_ro(sys: dict, fov: list, res: float, Tread: float) -> tuple[npt.ND
     time : NDArray
         Time axis [s]
     nint : int
-        Number of interleaves that supports unalised FoV with the desired resolution.
+        Number of interleaves
     """
 
     tol = 0.98
@@ -421,12 +431,142 @@ def vds_fixed_ro(sys: dict, fov: list, res: float, Tread: float) -> tuple[npt.ND
     krmax = 0
     nint = 0
     k, g, time = None, None, None
+
+    # Ensure spiral_type is set
+    if 'spiral_type' not in sys:
+        sys['spiral_type'] = 0  # Default to Archimedean
+
     while krmax < krmax_target*tol:
         nint = nint+1
-        k,g,_,time = vds_design(sys, nint, fov, res, Tread)
-        # print(f'nint={nint}, krmax={krmax}, tread={time[-1]} \n')
+        k, g, _, _, time = spiralgen_design(sys, nint, fov, res*1e-3, Tread,
+                                           us_type=us_type, us_factor=us_factor,
+                                           us_transition=us_transition)
         krmax = sqrt(k[-1,0]*k[-1,0] + k[-1,1]*k[-1,1])
-    
+
+    return k, g, time, nint
+
+
+def vds_fixed_ro(sys: dict, fov: list, res: float, Tread: float, vds_factor: float = 1.0, num_fov_coeffs: int = 3, target_interleaves: int = 0) -> tuple[npt.NDArray | None, npt.NDArray | None, npt.NDArray | None, int]:
+    """vds_fixed_ro Sweeps until N interleaves found that satisfies desired res.
+
+    Uses spiralgen (James Pipe) when vds_factor > 1 for true variable density.
+    Uses vds_design (Brian Hargreaves) when vds_factor = 1 for uniform density.
+
+    Parameters
+    ----------
+    sys : dict
+        Contains the system specs for the design, 'max_slew', 'max_grad', 'Tdwell', 'os'
+    fov : list
+        Desired Field of View(s) [cm]
+    res : float
+        Desired resolution [mm]
+    Tread : float
+        Desired readout length [s] (RO Duration = Npoints*Ts)
+    vds_factor : float
+        Variable density sampling factor (default=1.0 for uniform sampling)
+        vds_factor controls outer k-space sampling density relative to center.
+        1.0 = Nyquist sampling everywhere (uniform)
+        >1.0 = outer k-space undersampled (sparser, fewer interleaves needed)
+        <1.0 = outer k-space oversampled (denser, more interleaves needed)
+        Examples:
+            vds_factor=2.0 -> outer k-space 2x sparser than center
+            vds_factor=0.5 -> outer k-space 2x denser than center
+    num_fov_coeffs : int
+        Number of FOV coefficients to use for VDS transition (default=3)
+        More coefficients = smoother transition from center to edge
+    target_interleaves : int
+        Target number of interleaves (shots) to design (default=0 for auto)
+        If > 0, designs spiral with exactly this many interleaves
+        If = 0, automatically determines number based on resolution
+
+    Returns
+    -------
+    k : NDArray
+        Designed k-space trajectory [m^-1]
+    g : NDArray
+        Designed gradient waveform [mT/m]
+    time : NDArray
+        Time axis [s]
+    nint : int
+        Number of interleaves that supports unaliased FoV with the desired resolution.
+    """
+
+    tol = 0.98
+    krmax_target = 1/(2*res*1e-3) # m^-1
+    krmax = 0
+    nint = 0
+    k, g, time = None, None, None
+
+    # If target_interleaves is specified, calculate the effective vds_factor needed
+    vds_factor_effective = vds_factor
+    if target_interleaves > 0:
+        # First, find how many interleaves uniform sampling would need
+        nint_uniform = 0
+        krmax_uniform = 0
+        while krmax_uniform < krmax_target*tol:
+            nint_uniform += 1
+            k_temp, _, _, _ = vds_design(sys, nint_uniform, fov, res, Tread)
+            krmax_uniform = sqrt(k_temp[-1,0]*k_temp[-1,0] + k_temp[-1,1]*k_temp[-1,1])
+
+        # Calculate implied vds_factor from target_interleaves
+        vds_factor_effective = nint_uniform / target_interleaves
+
+        print(f"Target interleaves: {target_interleaves}")
+        print(f"Uniform sampling needs: {nint_uniform} interleaves")
+        print(f"Implied vds_factor: {vds_factor_effective:.2f}")
+
+    # VDS uses FOV polynomial coefficients: FOV(r) = F0 + F1*r + F2*r^2 + ...
+    # where r is the normalized k-space radius (0 to 1)
+    # Larger FOV at outer r = sparser sampling = undersampling
+    # Smaller FOV at outer r = denser sampling = oversampling
+    if vds_factor_effective != 1.0:
+        if num_fov_coeffs < 1:
+            num_fov_coeffs = 1
+
+        # Create polynomial FOV coefficients for VDS
+        # vds_factor > 1: FOV increases with radius (undersample outer k-space)
+        # vds_factor < 1: FOV decreases with radius (oversample outer k-space)
+
+        # F0 is the base FOV at center
+        # Higher order terms scale FOV with powers of radius
+        fov_coeffs = []
+        for i in range(num_fov_coeffs):
+            if i == 0:
+                # F0: base FOV
+                fov_coeffs.append(fov[0])
+            else:
+                # F1, F2, ...: polynomial terms that scale with (vds_factor - 1)
+                # Positive coefficients → FOV increases → undersampling
+                # Negative coefficients → FOV decreases → oversampling
+                coeff = fov[0] * (vds_factor_effective - 1.0) * (i / num_fov_coeffs)
+                fov_coeffs.append(coeff)
+
+        if vds_factor_effective > 1.0:
+            print(f"Using VDS undersampling with vds_factor={vds_factor_effective:.2f}")
+            print(f"  FOV polynomial coefficients: {[f'{x:.2f}' for x in fov_coeffs]} cm")
+        else:
+            print(f"Using VDS oversampling with vds_factor={vds_factor_effective:.2f}")
+            print(f"  FOV polynomial coefficients: {[f'{x:.2f}' for x in fov_coeffs]} cm")
+
+        fov_vds = fov_coeffs
+    else:
+        # Uniform density: single FOV value
+        fov_vds = fov
+
+    # Design spiral trajectory
+    if target_interleaves > 0:
+        # Use specified number of interleaves
+        nint = target_interleaves
+        k,g,_,time = vds_design(sys, nint, fov_vds, res, Tread)
+        krmax = sqrt(k[-1,0]*k[-1,0] + k[-1,1]*k[-1,1])
+        print(f"Designed with target_interleaves={nint}, achieved krmax={krmax:.2f} m^-1 (target={krmax_target:.2f} m^-1)")
+    else:
+        # Automatically determine number of interleaves
+        while krmax < krmax_target*tol:
+            nint = nint+1
+            k,g,_,time = vds_design(sys, nint, fov_vds, res, Tread)
+            krmax = sqrt(k[-1,0]*k[-1,0] + k[-1,1]*k[-1,1])
+
     return k, g, time, nint
 
 def raster_to_grad(g: npt.NDArray, adc_dwell: float, grad_dwell: float) -> tuple[npt.ArrayLike, npt.ArrayLike]:

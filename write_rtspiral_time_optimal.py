@@ -56,9 +56,27 @@ fov   = params['acquisition']['fov'] # [cm]
 res   = params['acquisition']['resolution'] # [mm]
 Tread = params['spiral']['ro_duration'] # [s]
 
+# Get VDS parameters from config (optional)
+vds_factor = params['spiral'].get('vds_factor', 1.0)
+num_fov_coeffs = params['spiral'].get('num_fov_coeffs', 3)
+target_interleaves = params['spiral'].get('target_interleaves', 0)
+
+print(f'VDS factor: {vds_factor}')
+
+if target_interleaves > 0:
+    print(f'Target number of interleaves: {target_interleaves}')
+elif vds_factor > 1.0:
+    print(f'Using variable density spiral with undersampling factor: {vds_factor}')
+    print(f'Outer k-space will be sampled {vds_factor}x sparser than center')
+elif vds_factor < 1.0:
+    print(f'Using variable density spiral with oversampling factor: {vds_factor}')
+    print(f'Outer k-space will be sampled {1.0/vds_factor}x denser than center')
+else:
+    print('Using uniform density spiral')
 
 # Design the spiral trajectory
-k, g, t, n_int = vds_fixed_ro(spiral_sys, fov, res, Tread)
+k, g, t, n_int = vds_fixed_ro(spiral_sys, fov, res, Tread, vds_factor=vds_factor,
+                               num_fov_coeffs=num_fov_coeffs, target_interleaves=target_interleaves)
 if g is None:
     raise RuntimeError("Failed to design spiral trajectory. Please check your parameters.")
 print(f'Number of interleaves for fully sampled trajectory: {n_int}.')
@@ -66,10 +84,18 @@ print(f'Number of interleaves for fully sampled trajectory: {n_int}.')
 t_grad, g_grad = raster_to_grad(g, spiral_sys['adc_dwell'], GRT)
 
 # === design rewinder ===
-g_rewind_x, g_rewind_y, g_grad = design_rewinder(g_grad, params['spiral']['rewinder_time'], system, # type: ignore
-                                                slew_ratio=params['spiral']['slew_ratio'], 
-                                                grad_rew_method=params['spiral']['grad_rew_method'], 
-                                                M1_nulling=params['spiral']['M1_nulling'], rotate_grads=True)
+# Check if rotate_grads is enabled and method supports it
+rotate_grads = params['spiral'].get('rotate_grads', False)
+if rotate_grads and params['spiral']['grad_rew_method'] == 'gropt':
+    g_rewind_x, g_rewind_y, g_grad = design_rewinder(g_grad, params['spiral']['rewinder_time'], system, # type: ignore
+                                                    slew_ratio=params['spiral']['slew_ratio'],
+                                                    grad_rew_method=params['spiral']['grad_rew_method'],
+                                                    M1_nulling=params['spiral']['M1_nulling'], rotate_grads=True)
+else:
+    g_rewind_x, g_rewind_y = design_rewinder(g_grad, params['spiral']['rewinder_time'], system, # type: ignore
+                                            slew_ratio=params['spiral']['slew_ratio'],
+                                            grad_rew_method=params['spiral']['grad_rew_method'],
+                                            M1_nulling=params['spiral']['M1_nulling'], rotate_grads=False)
 
 # concatenate g and g_rewind, and plot.
 g_grad = np.concatenate((g_grad, np.stack([g_rewind_x[0:], g_rewind_y[0:]]).T))
@@ -321,7 +347,15 @@ if params['user_settings']['write_seq']:
     seq.set_definition(key="TR", value=TR)
     seq.set_definition(key="FA", value=params['acquisition']['flip_angle'])
     seq.set_definition(key="Resolution_mm", value=res)
-    seq_filename = f"spiral_{params['spiral']['contrast']}{FA_schedule_str}{prep_str}{end_prep_str}_{params['spiral']['arm_ordering']}{params['spiral']['GA_angle']:.4f}_nTR{n_TRs}_Tread{params['spiral']['ro_duration']*1e3:.2f}_TR{TR*1e3:.2f}ms_FA{params['acquisition']['flip_angle']}_{params['user_settings']['filename_ext']}"
+
+    # Add VDS info to filename if using variable density
+    m1_str = "M1" if params['spiral']['M1_nulling'] else ""
+    if vds_factor != 1.0:
+        vds_str = f"vds{vds_factor:.2f}"
+    else:
+        vds_str = ""
+
+    seq_filename = f"spiral_{params['spiral']['contrast']}{FA_schedule_str}{prep_str}{end_prep_str}_{params['spiral']['arm_ordering']}{params['spiral']['GA_angle']:.4f}_nTR{n_TRs}_views{n_int}_Tread{params['spiral']['ro_duration']*1e3:.2f}_TR{TR*1e3:.2f}ms_FA{params['acquisition']['flip_angle']}_{m1_str}_{vds_str}_{params['user_settings']['filename_ext']}"
 
     # remove double, triple, quadruple underscores, and trailing underscores
     seq_filename = seq_filename.replace("__", "_").replace("__", "_").replace("__", "_").strip("_")

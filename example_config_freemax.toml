@@ -1,0 +1,125 @@
+# HyperSLICE-style Spiral Sequence Configuration - OPTIMIZED PARAMETERS
+#
+# This configuration file uses HyperSLICE trajectory parameterization for
+# dynamic spiral imaging with temporal resolution optimization.
+#
+# Based on: https://github.com/mrphys/HyperSLICE
+# Paper: PMID 37799087
+#
+# VERIFIED WORKING PARAMETERS:
+#   Base resolution: 240 (1.67mm at 40cm FOV)
+#   Spiral arms: 16 (undersampled, rotated)
+#   Inner k-space radius: 0.15 (15% fully sampled center)
+#   Variable density outer cutoff: 0.56 (reaches full k-space)
+#   Outer density: 0.07 (7% Nyquist at edge)
+#   Transition: Hanning
+#   Readout time: 1.64 ms (achieved)
+#   Deadtime: 2.0 ms
+#   Max gradient: 21.1 mT/m (96% of 22 mT/m limit)
+#   K-space extent: Full Nyquist (normalized |k|=1.0)
+#
+# Usage: python write_rtspiral_dd.py -c example_config_hyperslice
+
+[system]
+max_grad          =     22 # [mT/m] From HyperSLICE config_optimized_traj()
+max_slew          =     60 # [T/m/s] Adjusted for rtspiral implementation
+grad_raster_time  =  10e-6 # [s]
+rf_raster_time    =   1e-6 # [s]
+rf_ringdown_time  =  10e-6 # [s]
+rf_dead_time      = 200e-6 # [s]
+adc_dead_time     =  10e-6 # [s]
+
+[spiral]
+contrast     = 'FISP'
+slew_ratio   = 0.8  # Standard slew ratio (with lower gradient limits)
+# NOTE: ro_duration is NOT used in HyperSLICE mode - readout time is optimized automatically
+ro_duration = 2e-3 # [s] (ignored in HyperSLICE mode)
+adc_dwell   = 2.0e-6 # [s] ADC sample dwell time (from HyperSLICE source code)
+arm_ordering = 'ga'
+GA_steps     = 256 # Number of unique GA_steps, determines the duration of 1 repetition. Only enabled if 'ga' is selected.
+GA_angle       = 137.5077 # [deg] GA
+vds_factor      = 0.5
+
+# Rewinder configuration (same as standard mode)
+grad_rew_method = 'ext_trap_area' # 'gropt', 'ext_trap_area', 'exact_time', 'm1_nayak'
+                                   # Using ext_trap_area to avoid gropt issues
+rewinder_time   = 1.0e-3 # [s] Max rewinder time (increased for deadtime)
+M1_nulling      = false  # First moment nulling for flow compensation
+rotate_grads    = false  # Rotate gradients for optimal timing
+
+# HyperSLICE-specific parameters - OPTIMIZED
+[spiral.hyperslice]
+# Base resolution (matrix size)
+base_resolution = 192  # Base matrix size (240x240, gives 1.67mm pixel at 40cm FOV)
+
+# Spiral arm configuration
+# From HyperSLICE source: config_optimized_traj()
+vd_spiral_arms = 24  # Number of spiral arms (HyperSLICE uses 16, not 15)
+optimize_arms = false  # Use exact spiral arm count (true = optimize to fit timing window)
+
+# Variable-density parameters - FROM HYPERSLICE config_optimized_traj()
+# Source: https://github.com/mrphys/HyperSLICE/blob/master/utils/preprocessing_trajectory_gen.py
+vd_inner_cutoff = 0.15      # Normalized radius (0-1) where undersampling starts
+                             # 0.15 = fully sample inner 15% of k-space (HyperSLICE value)
+pre_vd_outer_cutoff = 0.41288  # Offset for outer cutoff calculation (HyperSLICE exact value)
+                                # This achieves the desired outer cutoff with HyperSLICE formula
+vd_outer_density = 0.07     # Final density at edge (0-1)
+                             # 0.07 = 7% of Nyquist = ~14x undersampling at edge
+vd_type = 'hanning'         # Transition type: 'linear', 'quadratic', 'hanning'
+                             # OPTIMIZED: Hanning gives smooth transition
+
+# Temporal optimization parameters - FROM HYPERSLICE SOURCE CODE
+# Target: TR = 3.67 ms, Temporal resolution = 55 ms
+# Readout time target: ~1.67 ms (TR - deadtime = 3.67 - 2.0 = 1.67)
+min_max_arm_time = [1.3, 2.0]  # [ms] Acceptable readout time window
+                                # Target ~1.67 ms readout per spiral arm
+                                # With 15 arms (not optimized)
+max_tempres = 55.0  # [ms] OPTIMIZED: Maximum temporal resolution target
+                     # Number of views per frame = max_tempres / TR
+                     # With TR=3.67ms: views = 55/3.67 ≈ 15
+
+# Timing parameters - FROM HYPERSLICE SOURCE CODE
+# Source: https://github.com/mrphys/HyperSLICE/blob/master/utils/preprocessing_trajectory_gen.py
+deadtime = 0.5  # [ms] Deadtime value from HyperSLICE config_optimized_traj()
+                # This is the actual value used in their implementation
+                # TR(3.67) = readout_time(1.67) + deadtime(2.0)
+
+# Trajectory options - OPTIMIZED
+reverse = false      # Reverse trajectory direction (out-to-in vs in-to-out)
+ordering = 'golden'  # OPTIMIZED: Linear arm ordering for sequential acquisition
+                     # Options: 'linear', 'golden', 'ga', 'tiny', 'tinyga'
+tiny_number = 7      # For tiny golden angle mode only
+n_unique_rotations = 256  # Number of unique golden angle rotations for reconstruction
+                          # Total TRs will cycle through base arms with these rotations
+
+[acquisition]
+# Spatial parameters
+fov             = [40.0]  # [cm] Field of view
+# NOTE: resolution is calculated from base_resolution and FOV in HyperSLICE mode
+# resolution = FOV / base_resolution
+slice_thickness = 8       # [mm]
+tbwp            = 2       # Time-bandwidth product for RF pulse
+resolution      = 1.38    # [mm]
+
+# RF parameters
+flip_angle      = 35    # [deg]
+rf_duration     = 0.5e-3  # [s]
+
+# Timing (use 0 for minimum)
+TR              = 0     # [ms], 0 for min TR
+TE              = 0     # [ms], 0 for min TE
+
+# Acquisition parameters
+repetitions     = 1    # Number of times to repeat the sequence
+
+[user_settings]
+write_seq    = false
+filename_ext = '_hs' # This will be attached to the filename
+show_plots   = true      # Disable plots to avoid hanging
+detailed_rep = true
+
+[acoustic_resonances]
+#frequencies = [700, 1164] # Aera
+#bandwidths = [100, 250]   # Aera
+frequencies = [595, 1030] # Free.max
+bandwidths = [130, 250]   # Free.max
